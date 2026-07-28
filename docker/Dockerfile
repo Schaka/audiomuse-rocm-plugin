@@ -60,18 +60,24 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 WORKDIR /app
 COPY requirements/rocm.txt /app/requirements/rocm.txt
+# common.txt is taken from the core image rather than vendored here so the app
+# deps can never drift from the core release this image is built against. It
+# has to be installed, not inherited: core installs with `uv pip install
+# --system` into system site-packages, and only /app is copied from it, so
+# nothing of common.txt reaches this image's venv on its own.
+COPY --from=core /app/requirements/common.txt /app/requirements/common.txt
 
 # Install into the base image's venv (/opt/venv), which already has onnxruntime
 # built with MIGraphXExecutionProvider. Target the venv interpreter explicitly
 # (not system python3.12) so deps land where the app actually runs; onnxruntime
-# stays out of rocm.txt so it's never reinstalled/clobbered. common.txt comes
-# from the core image (already installed there); only rocm.txt's extras
-# (currently just tqdm) need adding on top.
+# is deliberately absent from both requirements files so it is never reinstalled
+# and the MIGraphX build never gets clobbered by a CPU-only wheel.
 ENV VIRTUAL_ENV=/opt/venv
 RUN set -eux; \
     uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --index-strategy unsafe-best-match \
-        -r /app/requirements/rocm.txt; \
+        -r /app/requirements/rocm.txt -r /app/requirements/common.txt; \
     "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); print('ORT providers:', p); assert 'MIGraphXExecutionProvider' in p, 'MIGraphX EP missing'"; \
+    "$VIRTUAL_ENV/bin/python3" -c "import psycopg2, av, huggingface_hub; print('common.txt deps OK')"; \
     find "$VIRTUAL_ENV/lib" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
 # faster-whisper on the AMD GPU via CTranslate2's ROCm HIP backend. The ROCm

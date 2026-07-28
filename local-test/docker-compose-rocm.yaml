@@ -28,6 +28,10 @@ x-rocm-build: &rocm-build
   dockerfile: docker/Dockerfile
   args:
     BASE_IMAGE: ${ROCM_BASE_IMAGE:-ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx1201}
+    # The published core is still older than the plugin's min_core_version, so
+    # override this with your own core build to see the plugin in the catalog:
+    #   CORE_IMAGE=audiomuse-ai:local docker compose -f ... up --build
+    CORE_IMAGE: ${CORE_IMAGE:-ghcr.io/neptunehub/audiomuse-ai:latest}
 
 services:
   redis:

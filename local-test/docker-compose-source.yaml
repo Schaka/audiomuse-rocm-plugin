@@ -1,0 +1,63 @@
+# Overlay that builds the AudioMuse-AI core image FROM SOURCE instead of
+# pulling the published one, so the ROCm image can be tested against a branch
+# or fork that has the plugin seams before they are released.
+#
+# Layered on top of docker-compose-rocm.yaml rather than replacing it - every
+# service, volume and GPU passthrough setting comes from that file; this only
+# adds the core build and repoints CORE_IMAGE at it.
+#
+# Usage (from this repo's root) - build core first, then everything else:
+#
+#   docker compose -f local-test/docker-compose-rocm.yaml \
+#                  -f local-test/docker-compose-source.yaml \
+#                  --profile core build audiomuse-ai-core
+#
+#   docker compose -f local-test/docker-compose-rocm.yaml \
+#                  -f local-test/docker-compose-source.yaml \
+#                  up --build
+#
+# Two commands, not one: compose does not guarantee it builds audiomuse-ai-core
+# before the images whose Dockerfile does `FROM ${CORE_IMAGE}`, so the core
+# build is an explicit first step behind its own profile.
+#
+# Defaults to Schaka/AudioMuse-AI:main. AUDIOMUSE_CONTEXT is a plain Docker
+# build context, so it takes either a git URL with a #ref fragment or a local
+# path - one variable rather than a repo/ref pair, because the #ref form is
+# meaningless for a local path and splitting them invites building the wrong
+# combination:
+#
+#   AUDIOMUSE_CONTEXT=https://github.com/Schaka/AudioMuse-AI.git#some-branch
+#   AUDIOMUSE_CONTEXT=https://github.com/NeptuneHub/AudioMuse-AI.git#main
+#
+# A local checkout is the fast path while iterating on core - no push required.
+# Relative paths resolve from THIS file's directory:
+#
+#   AUDIOMUSE_CONTEXT=../../AudioMuse-AI docker compose ... build audiomuse-ai-core
+#
+# The core build is the slow part (it downloads ~5GB of analysis models). It is
+# cached, so repeat runs only pay for it when the branch actually moves.
+
+services:
+  # Build target only - never started. `profiles` keeps it out of `up`, while
+  # naming it explicitly on the build command still enables it.
+  audiomuse-ai-core:
+    build:
+      context: ${AUDIOMUSE_CONTEXT:-https://github.com/Schaka/AudioMuse-AI.git#main}
+      dockerfile: Dockerfile
+      # Left at the Dockerfile's ubuntu:24.04 default on purpose: that selects
+      # its CPU dependency set. Only /app (code + models + HF cache) and
+      # requirements/common.txt are consumed from this image - onnxruntime and
+      # torch come from the ROCm base instead, so a CUDA core build would be
+      # wasted bytes.
+    image: ${CORE_IMAGE:-audiomuse-ai-core:local}
+    profiles: ["core"]
+
+  audiomuse-ai-flask:
+    build:
+      args:
+        CORE_IMAGE: ${CORE_IMAGE:-audiomuse-ai-core:local}
+
+  audiomuse-ai-worker:
+    build:
+      args:
+        CORE_IMAGE: ${CORE_IMAGE:-audiomuse-ai-core:local}

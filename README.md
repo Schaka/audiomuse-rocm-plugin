@@ -43,9 +43,12 @@ https://github.com/Schaka/audiomuse-rocm-plugin/releases/download/unstable/repos
 Add one or the other, not both — they publish the same plugin id, and unstable
 versions sort above the stable release they were built on top of.
 
-> The plugin requires core **3.1.0 or newer**. AudioMuse-AI filters the catalog
+> The plugin requires core **3.0.0 or newer**. AudioMuse-AI filters the catalog
 > by `min_core_version`, so on an older core the entry is silently absent rather
-> than shown as incompatible.
+> than shown as incompatible. Bump this in
+> `plugin/rocm_accelerator/plugin.json` once the plugin seams land in a tagged
+> core release — it is currently permissive enough to install against a core
+> that does not have them.
 
 ## Run the worker image
 
@@ -86,6 +89,26 @@ working tree and serves it over HTTP. Add
 `http://plugin-catalog:8099/manifest.json` as a repository in the Plugins UI to
 install whatever is currently checked out — no tag, no release, no GitHub round
 trip. Override `ROCM_BASE_IMAGE` to test another arch.
+
+### Against an unreleased core
+
+The published core image does not have the plugin seams yet. To build core from
+a branch or fork instead, add the `docker-compose-source.yaml` overlay — core
+first, since the ROCm image does `FROM ${CORE_IMAGE}`:
+
+```bash
+COMPOSE="-f local-test/docker-compose-rocm.yaml -f local-test/docker-compose-source.yaml"
+docker compose $COMPOSE --profile core build audiomuse-ai-core
+docker compose $COMPOSE up --build
+```
+
+Defaults to `Schaka/AudioMuse-AI:main`. `AUDIOMUSE_CONTEXT` takes any Docker
+build context — a git URL with a `#ref` fragment, or a local path (resolved
+from `local-test/`) to iterate without pushing:
+
+```bash
+AUDIOMUSE_CONTEXT=../../AudioMuse-AI docker compose $COMPOSE --profile core build audiomuse-ai-core
+```
 
 ## How releases work
 

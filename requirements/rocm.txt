@@ -1,5 +1,5 @@
-# ROCm (AMD GPU) extra requirements, installed alongside common.txt by
-# Dockerfile-rocm. Deliberately empty of ONNX/GPU wheels:
+# ROCm (AMD GPU) extra requirements, installed by docker/Dockerfile alongside
+# the core image's own common.txt. Deliberately empty of ONNX/GPU wheels:
 #
 #   * onnxruntime -> supplied by the rocm/onnxruntime base image. Adding it
 #                    here would clobber the MIGraphX build with a CPU-only one.
