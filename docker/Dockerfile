@@ -43,17 +43,21 @@ SHELL ["/bin/bash", "-c"]
 # either without knowing which was selected: wheel/ always holds the wheel,
 # lib/ holds any shared libs the wheel does not already bundle (empty here -
 # upstream's release wheels are auditwheel-repaired and self-contained).
+# Fetched with the venv's python, not curl/wget: the ROCm bases ship neither,
+# and an apt layer for a single download would drag the toolchain into an
+# otherwise empty stage.
 RUN set -eux; \
     mkdir -p /ct2-out/wheel /ct2-out/lib; \
     cd /tmp; \
+    url="https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"; \
     n=0; \
     until [ "$n" -ge 5 ]; do \
-        if wget "https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"; then \
+        if /opt/venv/bin/python3 -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], 'rocm-python-wheels-Linux.zip')" "$url"; then \
             break; \
         fi; \
         rm -f rocm-python-wheels-Linux.zip; \
         n=$((n+1)); \
-        echo "wget attempt $n failed - retrying in $((n*n))s"; \
+        echo "download attempt $n failed - retrying in $((n*n))s"; \
         sleep $((n*n)); \
     done; \
     test -f rocm-python-wheels-Linux.zip; \
@@ -83,6 +87,9 @@ RUN set -eux; \
 # WITH_CUDNN is off: it maps to MIOpen on ROCm, which has patchy Polaris
 # support, and CTranslate2 does not need it. OpenBLAS provides the CPU backend
 # in place of MKL, matching the runtime libs the final image installs.
+# OPENMP_RUNTIME defaults to INTEL, which hard-fails on missing libiomp5 - that
+# only ships with MKL, so it has to follow WITH_MKL=OFF over to the compiler's
+# own libgomp.
 FROM ${BASE_IMAGE} AS ct2-source
 ARG ROCM_ARCH
 ARG CT2_REPO=https://github.com/OpenNMT/CTranslate2.git
@@ -103,6 +110,7 @@ RUN set -eux; \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DWITH_MKL=OFF \
         -DWITH_OPENBLAS=ON \
+        -DOPENMP_RUNTIME=COMP \
         -DWITH_HIP=ON \
         -DWITH_CUDNN=OFF \
         -DCMAKE_HIP_ARCHITECTURES="${ROCM_ARCH}" \
