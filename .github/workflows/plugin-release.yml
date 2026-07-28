@@ -1,0 +1,126 @@
+name: Plugin release (stable)
+
+# Publishes a stable plugin release on every v* tag.
+#
+# Nothing is committed back to main. The catalog files are release assets, so
+# the URLs users configure are permanent:
+#
+#   repository.json -> .../releases/latest/download/repository.json
+#   plugin.json     -> .../releases/latest/download/plugin.json
+#
+# GitHub resolves /releases/latest/ to the newest NON-prerelease release, which
+# is why the unstable channel (plugin-unstable.yml) publishes a prerelease and
+# can never hijack these URLs. Publishing as assets rather than committing the
+# catalog back to main also avoids a push-to-main loop that would retrigger the
+# image builds on every plugin release.
+#
+# The versions list is rebuilt by re-reading the small version.json asset that
+# every past stable release uploaded, rather than by carrying state in the repo.
+# That keeps rollback working (core resolves a requested version out of this
+# list, plugin/blueprint.py:_resolve_install_source) and self-heals if a release
+# is deleted or edited by hand.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing v* tag to (re)publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Checks out the tag, not main: the published zip must be the code that
+      # was tagged, even if main has moved on since.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - id: vars
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      # The annotated tag's message is the changelog shown in the Plugins UI.
+      # Lightweight tags carry no message, so fall back to something non-empty.
+      - id: changelog
+        run: |
+          body="$(git tag -l --format='%(contents)' "${{ steps.vars.outputs.tag }}")"
+          [ -n "${body//[[:space:]]/}" ] || body="Release ${{ steps.vars.outputs.version }}"
+          {
+            echo "text<<CHANGELOG_EOF"
+            echo "$body"
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: package
+        run: |
+          chmod +x .github/scripts/*.sh
+          version="${{ steps.vars.outputs.version }}"
+          zip="rocm_accelerator-${version}.zip"
+          md5="$(.github/scripts/package-plugin.sh "$version" "$zip")"
+          echo "zip=${zip}" >> "$GITHUB_OUTPUT"
+          echo "md5=${md5}" >> "$GITHUB_OUTPUT"
+
+      # One self-describing entry per release, uploaded alongside the zip. This
+      # is the per-release state the aggregation step below reads back.
+      - name: Write this release's version.json
+        run: |
+          jq -n \
+            --arg version "${{ steps.vars.outputs.version }}" \
+            --arg min_core "$(jq -r '.min_core_version' plugin/rocm_accelerator/plugin.json)" \
+            --arg changelog "${{ steps.changelog.outputs.text }}" \
+            --arg url "https://github.com/${{ github.repository }}/releases/download/${{ steps.vars.outputs.tag }}/${{ steps.package.outputs.zip }}" \
+            --arg checksum "${{ steps.package.outputs.md5 }}" \
+            '{version: $version, min_core_version: $min_core, changelog: $changelog,
+              sourceUrl: $url, checksum: $checksum}' > version.json
+
+      # Created before aggregation so this release is already the /latest/ one
+      # and is itself picked up by the versions list.
+      - name: Publish the release
+        run: |
+          tag="${{ steps.vars.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${{ steps.package.outputs.zip }}" version.json --clobber
+          else
+            gh release create "$tag" \
+              --title "ROCm Accelerator ${{ steps.vars.outputs.version }}" \
+              --notes "${{ steps.changelog.outputs.text }}" \
+              "${{ steps.package.outputs.zip }}" version.json
+          fi
+
+      # Newest first. Core sorts the list itself, but an ordered file is easier
+      # to eyeball and makes versions[0] the current release.
+      - name: Aggregate every stable release into the catalog
+        run: |
+          mkdir -p agg
+          gh release list --limit 200 --json tagName,isPrerelease,isDraft \
+            | jq -r '.[] | select(.isPrerelease | not) | select(.isDraft | not) | .tagName' \
+            | while read -r t; do
+                gh release download "$t" --pattern version.json --dir "agg/$t" 2>/dev/null || continue
+              done
+          jq -s '
+            def vkey: (.version // "0") | [splits("[.+-]")]
+                      | map(if test("^[0-9]+$") then tonumber else 0 end);
+            sort_by(vkey) | reverse
+          ' agg/*/version.json > versions.json
+          test "$(jq 'length' versions.json)" -gt 0
+
+      - name: Upload the catalog files
+        run: |
+          .github/scripts/catalog.sh versions.json \
+            "https://github.com/${{ github.repository }}/releases/latest/download/plugin.json" \
+            out
+          gh release upload "${{ steps.vars.outputs.tag }}" \
+            out/plugin.json out/repository.json --clobber

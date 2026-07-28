@@ -1,0 +1,100 @@
+name: ROCm worker image (unstable)
+
+# Tracks NeptuneHub/AudioMuse-AI's main branch, which publishes
+# ghcr.io/neptunehub/audiomuse-ai:devel on every commit.
+#
+# GitHub cannot fire a workflow here from a push in a repo we do not own, and
+# repository_dispatch would need a token on their side, so this polls instead.
+# Nightly rather than per-commit: 14 arches of ROCm layers per run is far too
+# much to rebuild on every upstream commit, and :devel is a moving target
+# anyway.
+#
+# The "did anything change" state is an Actions cache keyed on the core image's
+# digest - no file committed to the repo, so nothing here can retrigger itself.
+# Pushes to this repo's own image inputs rebuild unconditionally.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+      - 'requirements/**'
+      - '.github/workflows/image-unstable.yml'
+      - '.github/workflows/image-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-unstable
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      core-image: ${{ steps.core.outputs.image }}
+      build: ${{ steps.decide.outputs.build }}
+      cache-key: ${{ steps.core.outputs.cache-key }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pinned by digest, not by :devel, so every arch in the matrix bakes the
+      # same core even if upstream pushes mid-run.
+      - id: core
+        run: |
+          digest="$(docker buildx imagetools inspect \
+            ghcr.io/neptunehub/audiomuse-ai:devel --format '{{.Manifest.Digest}}')"
+          test -n "$digest"
+          echo "image=ghcr.io/neptunehub/audiomuse-ai@${digest}" >> "$GITHUB_OUTPUT"
+          echo "cache-key=core-devel-${digest}" >> "$GITHUB_OUTPUT"
+
+      - id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .core-digest
+          key: ${{ steps.core.outputs.cache-key }}
+          lookup-only: true
+
+      - id: decide
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.seen.outputs.cache-hit }}" = "true" ]; then
+            echo "Core :devel unchanged since the last build; nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image-build.yml
+    secrets: inherit
+    with:
+      core-image: ${{ needs.check.outputs.core-image }}
+
+  # Recorded only on success, so a failed run is retried on the next tick
+  # instead of being marked as already built.
+  record:
+    needs: [check, build]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ needs.check.outputs.core-image }}" > .core-digest
+      - uses: actions/cache/save@v4
+        with:
+          path: .core-digest
+          key: ${{ needs.check.outputs.cache-key }}

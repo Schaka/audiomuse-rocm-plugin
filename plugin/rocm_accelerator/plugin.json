@@ -1,0 +1,11 @@
+{
+  "id": "rocm_accelerator",
+  "name": "ROCm Accelerator (AMD)",
+  "author": "Schaka",
+  "description": "Runs musicnn on the AMD GPU via ONNX Runtime's MIGraphX provider and swaps the lyrics ASR backend to faster-whisper (CTranslate2 ROCm). Requires the AudioMuse-AI ROCm worker image; inert on other images.",
+  "version": "0.0.0-dev",
+  "min_core_version": "3.1.0",
+  "targets": ["worker"],
+  "requirements": [],
+  "changelog": "Proof of concept: MIGraphX provider for musicnn + faster-whisper ASR backend."
+}

@@ -1,0 +1,96 @@
+name: Plugin release (unstable)
+
+# Republishes the unstable plugin channel on every push to main that touches
+# the plugin.
+#
+# Everything lives on one rolling prerelease tag, so the catalog URL is fixed:
+#
+#   https://github.com/<owner>/<repo>/releases/download/unstable/repository.json
+#
+# It must stay a PRERELEASE: /releases/latest/download/ resolves to the newest
+# non-prerelease release, and that is how the stable channel's URLs stay stable
+# (plugin-release.yml).
+#
+# The version is derived from the newest v* tag with the patch bumped, so an
+# unstable build always sorts ABOVE the stable release it was built on top of
+# and BELOW the next stable release. Core's version comparison splits on
+# [.+-] and maps non-numeric parts to 0 (plugin/manager.py:_parse_version), so
+# 0.1.1-unstable.7 -> (0,1,1,0,7): greater than 0.1.0, less than 0.2.0. The run
+# number keeps successive unstable builds monotonically increasing, which is
+# what makes core offer them as updates.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugin/**'
+      - '.github/scripts/**'
+      - '.github/workflows/plugin-unstable.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plugin-unstable
+  cancel-in-progress: true
+
+jobs:
+  unstable:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UNSTABLE_TAG: unstable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: vars
+        run: |
+          last="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          if [ -n "$last" ]; then
+            # Padded so a two-component tag still fills all three fields; the
+            # trailing catch-all absorbs the padding read would otherwise leave
+            # in patch.
+            IFS=. read -r major minor patch _rest <<< "${last#v}.0.0"
+            patch="${patch%%[!0-9]*}"
+            base="${major:-0}.${minor:-0}.$(( ${patch:-0} + 1 ))"
+          else
+            base="0.0.1"
+          fi
+          echo "version=${base}-unstable.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - id: package
+        run: |
+          chmod +x .github/scripts/*.sh
+          version="${{ steps.vars.outputs.version }}"
+          md5="$(.github/scripts/package-plugin.sh "$version" rocm_accelerator-unstable.zip)"
+          echo "md5=${md5}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the unstable catalog
+        run: |
+          jq -n \
+            --arg version "${{ steps.vars.outputs.version }}" \
+            --arg min_core "$(jq -r '.min_core_version' plugin/rocm_accelerator/plugin.json)" \
+            --arg changelog "Unstable build from ${{ github.sha }} on $(date -u +%Y-%m-%d). Untested; expect breakage." \
+            --arg url "https://github.com/${{ github.repository }}/releases/download/${{ env.UNSTABLE_TAG }}/rocm_accelerator-unstable.zip" \
+            --arg checksum "${{ steps.package.outputs.md5 }}" \
+            '[{version: $version, min_core_version: $min_core, changelog: $changelog,
+               sourceUrl: $url, checksum: $checksum}]' > versions.json
+          .github/scripts/catalog.sh versions.json \
+            "https://github.com/${{ github.repository }}/releases/download/${{ env.UNSTABLE_TAG }}/plugin.json" \
+            out
+
+      # Deleted and recreated rather than updated in place so the rolling tag
+      # follows main's HEAD. The assets are unavailable for the second or two
+      # between the two calls; an in-flight install would just be retried.
+      - name: Republish the rolling unstable release
+        run: |
+          gh release delete "$UNSTABLE_TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$UNSTABLE_TAG" \
+            --target "${{ github.sha }}" \
+            --prerelease \
+            --title "ROCm Accelerator (unstable)" \
+            --notes "Rolling unstable build of \`main\`. Version ${{ steps.vars.outputs.version }}, commit ${{ github.sha }}. Not for production." \
+            rocm_accelerator-unstable.zip out/plugin.json out/repository.json

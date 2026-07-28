@@ -1,0 +1,113 @@
+name: Build ROCm worker image
+
+# Reusable per-arch build of docker/Dockerfile. Called by image-stable.yml and
+# image-unstable.yml, which decide WHEN to build and which core image to bake;
+# this file only decides HOW.
+#
+# One tag per arch rather than a multi-arch manifest, same as the base images in
+# Schaka/rocm-migraphx-ort-builder: each arch's ROCm kernel binaries are large
+# enough that baking several into one image overruns a hosted runner's disk.
+
+on:
+  workflow_call:
+    inputs:
+      core-image:
+        description: 'Fully qualified AudioMuse-AI core image to COPY /app from (pin by digest or version).'
+        required: true
+        type: string
+      version:
+        description: 'Release version without the v (e.g. 3.0.5). Empty builds the unstable channel.'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      # Kept in step with rocm-migraphx-ort-builder's published base images: the
+      # nightly matrix plus the separately-built Polaris variant.
+      matrix:
+        arch:
+          - gfx900
+          - gfx906
+          - gfx908
+          - gfx90a
+          - gfx942
+          - gfx1030
+          - gfx1100
+          - gfx1101
+          - gfx1102
+          - gfx1150
+          - gfx1151
+          - gfx1200
+          - gfx1201
+          - gfx803  # Polaris, ROCm 6.x base - see rocm-migraphx-ort-builder/gfx803/README.md
+    steps:
+      # The ROCm base and the core image are both large; the runner's stock
+      # ~14GB of free disk is not enough to pull both and write the result.
+      - uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: |
+          owner="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+          self="${owner}/audiomuse-ai-rocm"
+          arch="${{ matrix.arch }}"
+          version="${{ inputs.version }}"
+
+          # gfx803 is a different ROCm major on a different base image, built by
+          # its own workflow upstream, so it has its own package with no arch
+          # suffix rather than being another tag in the main matrix.
+          if [ "$arch" = "gfx803" ]; then
+            base="${owner}/rocm-gfx803-ort-torch-builder:latest"
+          else
+            base="${owner}/rocm-migraphx-ort-torch-builder:latest-${arch}"
+          fi
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$version" ]; then
+            channel="stable"
+            tags="${self}:${version}-${arch},${self}:latest-${arch}"
+          else
+            channel="unstable"
+            tags="${self}:unstable-${arch},${self}:unstable-$(date -u +%Y%m%d)-${arch}"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          # Registry cache, not type=gha: GitHub caps Actions cache at 10GB per
+          # repo, which 14 arches of ROCm layers would evict on every run.
+          echo "cache=${self}:cache-${channel}-${arch}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            BASE_IMAGE=${{ steps.meta.outputs.base }}
+            CORE_IMAGE=${{ inputs.core-image }}
+          cache-from: type=registry,ref=${{ steps.meta.outputs.cache }}
+          cache-to: type=registry,ref=${{ steps.meta.outputs.cache }},mode=max

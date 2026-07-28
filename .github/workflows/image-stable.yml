@@ -1,0 +1,112 @@
+name: ROCm worker image (stable)
+
+# Tracks NeptuneHub/AudioMuse-AI's version tags. Their v* builds publish
+# ghcr.io/neptunehub/audiomuse-ai:<version> alongside :latest, and this
+# republishes our ROCm worker image against that exact version.
+#
+# Polled every 30 minutes because a release in a repo we do not own cannot
+# trigger a workflow here. The poll itself is a few seconds of a hosted runner;
+# the expensive matrix only runs when the upstream tag actually changed, tracked
+# via an Actions cache key rather than a file in the repo.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream AudioMuse-AI version to build against (e.g. v3.0.5). Empty uses their latest release.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-stable
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      core-image: ${{ steps.core.outputs.image }}
+      version: ${{ steps.core.outputs.version }}
+      build: ${{ steps.decide.outputs.build }}
+      cache-key: ${{ steps.core.outputs.cache-key }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: core
+        run: |
+          tag="${{ inputs.version }}"
+          if [ -z "$tag" ]; then
+            tag="$(gh release view --repo NeptuneHub/AudioMuse-AI --json tagName -q .tagName)"
+          fi
+          test -n "$tag"
+          version="${tag#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/neptunehub/audiomuse-ai:${version}" >> "$GITHUB_OUTPUT"
+          echo "cache-key=core-release-${version}" >> "$GITHUB_OUTPUT"
+
+      # Their release is cut before their image finishes pushing, so a poll can
+      # see the tag minutes before :<version> exists. Bail out without recording
+      # anything and let the next tick pick it up.
+      - id: published
+        run: |
+          if docker buildx imagetools inspect "${{ steps.core.outputs.image }}" >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream ${{ steps.core.outputs.image }} is not published yet; retrying next poll."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .core-release
+          key: ${{ steps.core.outputs.cache-key }}
+          lookup-only: true
+
+      - id: decide
+        run: |
+          if [ "${{ steps.published.outputs.ok }}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.seen.outputs.cache-hit }}" = "true" ]; then
+            echo "Already built against ${{ steps.core.outputs.version }}; nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image-build.yml
+    secrets: inherit
+    with:
+      core-image: ${{ needs.check.outputs.core-image }}
+      version: ${{ needs.check.outputs.version }}
+
+  record:
+    needs: [check, build]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "${{ needs.check.outputs.core-image }}" > .core-release
+      - uses: actions/cache/save@v4
+        with:
+          path: .core-release
+          key: ${{ needs.check.outputs.cache-key }}
