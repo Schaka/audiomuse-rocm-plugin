@@ -286,10 +286,27 @@ RUN mkdir -p /app/.cache/miopen /app/.cache/migraphx && chmod 777 /app/.cache/mi
 # Pre-fetch the faster-whisper model so the image is self-contained. Verified
 # loadable on CPU here; the build host has no GPU so the GPU path runs at
 # runtime instead.
+#
+# The compute type is negotiated exactly as whisper_faster.py's CPU fallback
+# does: int8 needs a oneDNN/MKL build of CTranslate2, which the OpenBLAS-only
+# source builds are not, so float32 has to be accepted as a pass.
 RUN set -eux; \
     "$VIRTUAL_ENV/bin/python3" -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-small', local_dir='/app/model/faster-whisper-small')"; \
     test -f /app/model/faster-whisper-small/model.bin; \
-    "$VIRTUAL_ENV/bin/python3" -c "from faster_whisper import WhisperModel; WhisperModel('/app/model/faster-whisper-small', device='cpu', compute_type='int8'); print('faster-whisper model loads standalone OK (CPU)')"
+    "$VIRTUAL_ENV/bin/python3" - <<'PY'
+from faster_whisper import WhisperModel
+
+for compute in ("int8", "float32"):
+    try:
+        WhisperModel("/app/model/faster-whisper-small", device="cpu", compute_type=compute)
+    except ValueError as exc:
+        print(f"compute_type={compute} unsupported: {exc}")
+        continue
+    print(f"faster-whisper model loads standalone OK (CPU, {compute})")
+    break
+else:
+    raise SystemExit("faster-whisper model failed to load on CPU with any compute type")
+PY
 
 # Application code, analysis models and HF cache from the published core
 # image (last, for cache hits when only BASE_IMAGE/ROCm layers change). Docker

@@ -82,20 +82,30 @@ def load_whisper_model():
         try:
             _model = WhisperModel(model_src, device=_DEVICE, compute_type=_COMPUTE_TYPE)
         except Exception as exc:
-            # Fall back to CPU/int8 rather than failing the whole lyrics run.
+            # Fall back to CPU rather than failing the whole lyrics run. int8 is
+            # tried first for speed, but CTranslate2 only has an int8 CPU kernel
+            # when it was built against oneDNN/MKL - the source builds (gfx803,
+            # gfx9xx) are OpenBLAS-only and raise here, so float32 backs it up.
             logger.warning(
                 "faster-whisper GPU load failed (device=%s, compute=%s): %s - "
-                "falling back to CPU/int8",
+                "falling back to CPU",
                 _DEVICE,
                 _COMPUTE_TYPE,
                 exc,
             )
-            try:
-                _model = WhisperModel(model_src, device="cpu", compute_type="int8")
-            except Exception as exc2:
+            for cpu_compute in ("int8", "float32"):
+                try:
+                    _model = WhisperModel(model_src, device="cpu", compute_type=cpu_compute)
+                    break
+                except Exception as exc2:
+                    last_cpu_exc = exc2
+                    logger.warning(
+                        "faster-whisper CPU load failed (compute=%s): %s", cpu_compute, exc2
+                    )
+            else:
                 raise WhisperLoadRefused(
-                    f"faster_whisper load failed on GPU and CPU: {exc2}"
-                ) from exc2
+                    f"faster_whisper load failed on GPU and CPU: {last_cpu_exc}"
+                ) from last_cpu_exc
         _model_dir = _MODEL_DIR
         logger.info(
             "faster-whisper loaded (src=%s, device=%s, compute=%s)",
