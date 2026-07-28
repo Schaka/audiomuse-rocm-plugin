@@ -90,6 +90,16 @@ RUN set -eux; \
 # OPENMP_RUNTIME defaults to INTEL, which hard-fails on missing libiomp5 - that
 # only ships with MKL, so it has to follow WITH_MKL=OFF over to the compiler's
 # own libgomp.
+#
+# The whole C/CXX build runs through ROCm's clang, not the system GCC: both
+# trees compile plain .cc sources with -x hip, and HIPCXX only covers CMake's
+# HIP language, so GCC gets handed a -x hip it cannot parse ("language hip not
+# recognized"). This is also how both upstream and the fork build themselves.
+#
+# CMAKE_POLICY_VERSION_MINIMUM covers third_party/cpu_features, which still asks
+# for cmake_minimum_required below 3.5 - removed outright in the CMake 4 on the
+# ROCm 7 bases (ROCm 6/gfx803 has CMake 3.x, where it is only a warning). The
+# variable is simply unused on the older CMake, so one flag serves both.
 FROM ${BASE_IMAGE} AS ct2-source
 ARG ROCM_ARCH
 ARG CT2_REPO=https://github.com/OpenNMT/CTranslate2.git
@@ -103,11 +113,15 @@ RUN set -eux; \
 RUN set -eux; \
     git clone --branch "${CT2_REF}" --depth 1 --recursive "${CT2_REPO}" /ct2-src; \
     cd /ct2-src; \
-    export HIPCXX="$(hipconfig -l)/clang"; \
+    llvm_bin="$(hipconfig -l)"; \
+    export HIPCXX="${llvm_bin}/clang"; \
     export HIP_PATH="$(hipconfig -R)"; \
     cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_C_COMPILER="${llvm_bin}/clang" \
+        -DCMAKE_CXX_COMPILER="${llvm_bin}/clang++" \
         -DWITH_MKL=OFF \
         -DWITH_OPENBLAS=ON \
         -DOPENMP_RUNTIME=COMP \
