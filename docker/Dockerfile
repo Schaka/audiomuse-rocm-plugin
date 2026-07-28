@@ -18,10 +18,116 @@
 ARG BASE_IMAGE=ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx1201
 ARG CORE_IMAGE=ghcr.io/neptunehub/audiomuse-ai:latest
 
+# Which CTranslate2 to use - see the ct2-* stages below. "prebuilt" takes
+# upstream's ROCm 7 release wheel, which only carries device code for gfx1030
+# and newer; "source" compiles for this image's arch, from CT2_REPO/CT2_REF.
+# Three configurations in total, selected per arch in image-build.yml.
+ARG CT2_VARIANT=prebuilt
+ARG ROCM_ARCH=gfx1201
+ARG CT2_VERSION=4.8.1
+
 # ============================================================================
 # Stage 1: core - the published AudioMuse-AI image (app code + models + HF cache)
 # ============================================================================
 FROM ${CORE_IMAGE} AS core
+
+# ============================================================================
+# Stage 2a: ct2-prebuilt - CTranslate2's own ROCm release wheel
+# ============================================================================
+# Upstream ships one prebuilt ROCm wheel per release, linked against ROCm 7's
+# hipBLAS (libhipblas.so.3). Correct for every arch on the ROCm 7 base.
+FROM ${BASE_IMAGE} AS ct2-prebuilt
+ARG CT2_VERSION
+SHELL ["/bin/bash", "-c"]
+# Both ct2 stages emit the same /ct2-out layout so the runner can consume
+# either without knowing which was selected: wheel/ always holds the wheel,
+# lib/ holds any shared libs the wheel does not already bundle (empty here -
+# upstream's release wheels are auditwheel-repaired and self-contained).
+RUN set -eux; \
+    mkdir -p /ct2-out/wheel /ct2-out/lib; \
+    cd /tmp; \
+    n=0; \
+    until [ "$n" -ge 5 ]; do \
+        if wget "https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"; then \
+            break; \
+        fi; \
+        rm -f rocm-python-wheels-Linux.zip; \
+        n=$((n+1)); \
+        echo "wget attempt $n failed - retrying in $((n*n))s"; \
+        sleep $((n*n)); \
+    done; \
+    test -f rocm-python-wheels-Linux.zip; \
+    /opt/venv/bin/python3 -c "import zipfile; zipfile.ZipFile('rocm-python-wheels-Linux.zip').extractall('ct2whl')"; \
+    py_ver="$(/opt/venv/bin/python3 -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"; \
+    whl="$(find ct2whl -name "ctranslate2-${CT2_VERSION}-${py_ver}-${py_ver}-*.whl" | head -1)"; \
+    test -n "$whl"; \
+    cp "$whl" /ct2-out/wheel/; \
+    rm -rf /tmp/rocm-python-wheels-Linux.zip /tmp/ct2whl
+
+# ============================================================================
+# Stage 2b: ct2-source - CTranslate2 compiled from source for one arch
+# ============================================================================
+# Used for the two cases the prebuilt wheel does not cover, parametrized by
+# CT2_REPO/CT2_REF rather than split into two near-identical stages:
+#
+#   * ROCm 6 bases (Polaris/gfx803) -> arlo-phoenix/CTranslate2-rocm, the
+#     maintained HIP port. Upstream's wheel wants ROCm 7's libhipblas.so.3 and
+#     dies at import there.
+#   * Vega/CDNA (gfx900, gfx906, gfx908, gfx90a, gfx942) -> OpenNMT/CTranslate2
+#     itself. The base is ROCm 7 so the wheel loads fine, but it is compiled
+#     only for gfx1030 and newer (see prepare_build_environment_linux_rocm.sh),
+#     so those arches would get no device code and fail at the first GPU
+#     transcribe with "no kernel image is available". Building the same
+#     upstream source for the actual arch is the whole fix - no fork needed.
+#
+# WITH_CUDNN is off: it maps to MIOpen on ROCm, which has patchy Polaris
+# support, and CTranslate2 does not need it. OpenBLAS provides the CPU backend
+# in place of MKL, matching the runtime libs the final image installs.
+FROM ${BASE_IMAGE} AS ct2-source
+ARG ROCM_ARCH
+ARG CT2_REPO=https://github.com/OpenNMT/CTranslate2.git
+ARG CT2_REF=v4.8.1
+SHELL ["/bin/bash", "-c"]
+RUN set -eux; \
+    DEBIAN_FRONTEND=noninteractive apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git cmake ninja-build build-essential libopenblas-dev; \
+    rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    git clone --branch "${CT2_REF}" --depth 1 --recursive "${CT2_REPO}" /ct2-src; \
+    cd /ct2-src; \
+    export HIPCXX="$(hipconfig -l)/clang"; \
+    export HIP_PATH="$(hipconfig -R)"; \
+    cmake -S . -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DWITH_MKL=OFF \
+        -DWITH_OPENBLAS=ON \
+        -DWITH_HIP=ON \
+        -DWITH_CUDNN=OFF \
+        -DCMAKE_HIP_ARCHITECTURES="${ROCM_ARCH}" \
+        -DBUILD_TESTS=OFF; \
+    cmake --build build -j"$(nproc)"; \
+    cmake --install build
+# setup.py bdist_wheel is not auditwheel-repaired, so the wheel links against
+# libctranslate2.so without bundling it - the runner needs the shared lib
+# alongside it, unlike the prebuilt path.
+RUN set -eux; \
+    mkdir -p /ct2-out/wheel /ct2-out/lib; \
+    cd /ct2-src/python; \
+    /opt/venv/bin/python3 -m pip install --no-cache-dir -r install_requirements.txt; \
+    LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
+        /opt/venv/bin/python3 setup.py bdist_wheel; \
+    cp dist/*.whl /ct2-out/wheel/; \
+    cp -a /usr/local/lib/libctranslate2.so* /ct2-out/lib/
+
+# ============================================================================
+# Stage 2c: ct2 - whichever of the two above was selected
+# ============================================================================
+# BuildKit only builds the stages the target actually depends on, so the
+# unselected variant is never executed - the source compile costs nothing on
+# the 8 arches the prebuilt wheel already covers.
+FROM ct2-${CT2_VARIANT} AS ct2
 
 # ============================================================================
 # Stage 2: runner - ROCm base (MIGraphX ONNX Runtime) + app deps
@@ -82,30 +188,22 @@ RUN set -eux; \
 
 # faster-whisper on the AMD GPU via CTranslate2's ROCm HIP backend. The ROCm
 # Accelerator plugin registers this as the ASR backend; the libs must be present
-# in the image because the plugin ships no pip requirements. The wheel is a
-# GitHub release asset (not on PyPI). Installed --no-deps: its onnxruntime
-# dependency would otherwise clobber the base MIGraphX ORT with a CPU-only build.
-ARG CT2_VERSION=4.8.1
+# in the image because the plugin ships no pip requirements. The wheel comes
+# from the ct2 stage - upstream's ROCm 7 release wheel, or the ROCm fork built
+# from source for a ROCm 6 base. faster-whisper itself is installed --no-deps:
+# its onnxruntime dependency would otherwise clobber the base MIGraphX ORT with
+# a CPU-only build.
+COPY --from=ct2 /ct2-out /tmp/ct2-out
 RUN set -eux; \
-    cd /tmp; \
-    n=0; \
-    until [ "$n" -ge 5 ]; do \
-        if wget "https://github.com/OpenNMT/CTranslate2/releases/download/v${CT2_VERSION}/rocm-python-wheels-Linux.zip"; then \
-            break; \
-        fi; \
-        rm -f rocm-python-wheels-Linux.zip; \
-        n=$((n+1)); \
-        echo "wget attempt $n failed - retrying in $((n*n))s"; \
-        sleep $((n*n)); \
-    done; \
-    test -f rocm-python-wheels-Linux.zip; \
-    "$VIRTUAL_ENV/bin/python3" -c "import zipfile; zipfile.ZipFile('rocm-python-wheels-Linux.zip').extractall('ct2whl')"; \
-    py_ver="$("$VIRTUAL_ENV/bin/python3" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"; \
-    whl="$(find ct2whl -name "ctranslate2-${CT2_VERSION}-${py_ver}-${py_ver}-*.whl" | head -1)"; \
+    if compgen -G '/tmp/ct2-out/lib/*' >/dev/null; then \
+        cp -a /tmp/ct2-out/lib/. /usr/local/lib/; \
+        ldconfig; \
+    fi; \
+    whl="$(find /tmp/ct2-out/wheel -name 'ctranslate2-*.whl' | head -1)"; \
     test -n "$whl"; \
     uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache "$whl"; \
     uv pip install --python "$VIRTUAL_ENV/bin/python3" --no-cache --no-deps "faster-whisper==1.2.1"; \
-    rm -rf /tmp/rocm-python-wheels-Linux.zip /tmp/ct2whl; \
+    rm -rf /tmp/ct2-out; \
     "$VIRTUAL_ENV/bin/python3" -c "import ctranslate2; print('ctranslate2', ctranslate2.__version__)"; \
     "$VIRTUAL_ENV/bin/python3" -c "from faster_whisper import WhisperModel; print('faster_whisper import OK')"; \
     "$VIRTUAL_ENV/bin/python3" -c "import onnxruntime as ort; p=ort.get_available_providers(); assert 'MIGraphXExecutionProvider' in p, 'MIGraphX EP lost after faster-whisper install'; print('MIGraphX EP intact:', p)"; \

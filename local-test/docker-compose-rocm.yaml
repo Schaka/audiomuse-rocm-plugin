@@ -32,6 +32,14 @@ x-rocm-build: &rocm-build
     # override this with your own core build to see the plugin in the catalog:
     #   CORE_IMAGE=audiomuse-ai:local docker compose -f ... up --build
     CORE_IMAGE: ${CORE_IMAGE:-ghcr.io/neptunehub/audiomuse-ai:latest}
+    # "prebuilt" takes CTranslate2's ROCm release wheel, which only covers
+    # gfx1030+; "source" compiles CT2_REPO@CT2_REF for ROCM_ARCH, which gfx803
+    # (ROCm 6 -> the fork) and gfx9xx (outside the wheel's arch list ->
+    # upstream) both need. See docker/Dockerfile's ct2-* stages.
+    CT2_VARIANT: ${CT2_VARIANT:-prebuilt}
+    CT2_REPO: ${CT2_REPO:-https://github.com/OpenNMT/CTranslate2.git}
+    CT2_REF: ${CT2_REF:-v4.8.1}
+    ROCM_ARCH: ${ROCM_ARCH:-gfx1201}
 
 services:
   redis:

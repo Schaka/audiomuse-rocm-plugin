@@ -88,6 +88,35 @@ jobs:
           fi
           echo "base=${base}" >> "$GITHUB_OUTPUT"
 
+          # CTranslate2 comes in three flavours, because upstream's prebuilt
+          # ROCm wheel is built on ROCm 7 for gfx1030 and newer only
+          # (python/tools/prepare_build_environment_linux_rocm.sh):
+          #
+          #   gfx803        ROCm 6 base -> the wheel wants libhipblas.so.3 and
+          #                 fails at import; build the ROCm fork.
+          #   gfx9xx        ROCm 7 base, but outside the wheel's arch list, so
+          #                 it would import cleanly and then fail at the first
+          #                 GPU transcribe; build upstream for this arch.
+          #   gfx1030+      covered by the wheel as published.
+          ct2_repo="https://github.com/OpenNMT/CTranslate2.git"
+          ct2_ref="v4.8.1"
+          case "$arch" in
+            gfx803)
+              ct2_variant="source"
+              ct2_repo="https://github.com/arlo-phoenix/CTranslate2-rocm.git"
+              ct2_ref="rocm"
+              ;;
+            gfx900|gfx906|gfx908|gfx90a|gfx942)
+              ct2_variant="source"
+              ;;
+            *)
+              ct2_variant="prebuilt"
+              ;;
+          esac
+          echo "ct2-variant=${ct2_variant}" >> "$GITHUB_OUTPUT"
+          echo "ct2-repo=${ct2_repo}" >> "$GITHUB_OUTPUT"
+          echo "ct2-ref=${ct2_ref}" >> "$GITHUB_OUTPUT"
+
           if [ -n "$version" ]; then
             channel="stable"
             tags="${self}:${version}-${arch},${self}:latest-${arch}"
@@ -109,5 +138,9 @@ jobs:
           build-args: |
             BASE_IMAGE=${{ steps.meta.outputs.base }}
             CORE_IMAGE=${{ inputs.core-image }}
+            CT2_VARIANT=${{ steps.meta.outputs.ct2-variant }}
+            CT2_REPO=${{ steps.meta.outputs.ct2-repo }}
+            CT2_REF=${{ steps.meta.outputs.ct2-ref }}
+            ROCM_ARCH=${{ matrix.arch }}
           cache-from: type=registry,ref=${{ steps.meta.outputs.cache }}
           cache-to: type=registry,ref=${{ steps.meta.outputs.cache }},mode=max
