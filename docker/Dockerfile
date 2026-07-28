@@ -91,6 +91,11 @@ RUN set -eux; \
 # only ships with MKL, so it has to follow WITH_MKL=OFF over to the compiler's
 # own libgomp.
 #
+# BUILD_CLI is off both because the `translator` binary is dead weight here -
+# only libctranslate2 and the Python wheel get copied out - and because its
+# vendored cxxopts does not include <cstdint>, which newer libstdc++ no longer
+# pulls in transitively, so it fails on uint8_t regardless of arch.
+#
 # The whole C/CXX build runs through ROCm's clang, not the system GCC: both
 # trees compile plain .cc sources with -x hip, and HIPCXX only covers CMake's
 # HIP language, so GCC gets handed a -x hip it cannot parse ("language hip not
@@ -128,12 +133,23 @@ RUN set -eux; \
         -DWITH_HIP=ON \
         -DWITH_CUDNN=OFF \
         -DCMAKE_HIP_ARCHITECTURES="${ROCM_ARCH}" \
+        -DBUILD_CLI=OFF \
         -DBUILD_TESTS=OFF; \
-    cmake --build build -j"$(nproc)"; \
+    set -o pipefail; \
+    cmake --build build -j"$(nproc)" 2>&1 | tee /tmp/ct2-build.log || { \
+        echo "=== first failing translation unit ==="; \
+        grep -m1 -A30 '^FAILED:' /tmp/ct2-build.log; \
+        exit 1; \
+    }; \
     cmake --install build
 # setup.py bdist_wheel is not auditwheel-repaired, so the wheel links against
 # libctranslate2.so without bundling it - the runner needs the shared lib
 # alongside it, unlike the prebuilt path.
+#
+# libomp comes along for the same reason: OPENMP_RUNTIME=COMP under ROCm's
+# clang means -fopenmp=libomp, and that libomp lives in the ROCm LLVM tree,
+# which the runner has no reason to carry (it installs libgomp1, GCC's, which
+# is a different soname and does not satisfy the link).
 RUN set -eux; \
     mkdir -p /ct2-out/wheel /ct2-out/lib; \
     cd /ct2-src/python; \
@@ -141,7 +157,10 @@ RUN set -eux; \
     LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH:-} \
         /opt/venv/bin/python3 setup.py bdist_wheel; \
     cp dist/*.whl /ct2-out/wheel/; \
-    cp -a /usr/local/lib/libctranslate2.so* /ct2-out/lib/
+    cp -a /usr/local/lib/libctranslate2.so* /ct2-out/lib/; \
+    omp="$(dirname "$(hipconfig -l)")/lib/libomp.so"; \
+    test -f "$omp"; \
+    cp -aL "$omp" /ct2-out/lib/
 
 # ============================================================================
 # Stage 2c: ct2 - whichever of the two above was selected
