@@ -140,8 +140,14 @@ def download_samples(cache_dir: str, max_duration: float = 15.0) -> dict[str, np
         local_path = os.path.join(cache_dir, name + ".ogg")
         if not os.path.exists(local_path):
             print(f"Downloading {name} from {url} ...", file=sys.stderr)
+            # Wikimedia rejects urllib's default User-Agent ("Python-urllib/x.y")
+            # with a 403 - their User-Agent policy requires an identifying one:
+            # https://meta.wikimedia.org/wiki/User-Agent_policy
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "audiomuse-rocm-plugin-benchmark/1.0 (local test script)"}
+            )
             try:
-                with urllib.request.urlopen(url, timeout=15) as resp, open(local_path, "wb") as f:
+                with urllib.request.urlopen(req, timeout=15) as resp, open(local_path, "wb") as f:
                     f.write(resp.read())
             except (urllib.error.URLError, OSError) as exc:
                 print(f"Download failed ({exc}) - falling back to synthetic samples.", file=sys.stderr)
