@@ -79,6 +79,7 @@ def load_whisper_model():
             raise WhisperLoadRefused(f"faster_whisper import failed: {exc}") from exc
 
         model_src = _MODEL_DIR if os.path.isdir(_MODEL_DIR) else "small"
+        loaded_device, loaded_compute = _DEVICE, _COMPUTE_TYPE
         try:
             _model = WhisperModel(model_src, device=_DEVICE, compute_type=_COMPUTE_TYPE)
         except Exception as exc:
@@ -96,6 +97,7 @@ def load_whisper_model():
             for cpu_compute in ("int8", "float32"):
                 try:
                     _model = WhisperModel(model_src, device="cpu", compute_type=cpu_compute)
+                    loaded_device, loaded_compute = "cpu", cpu_compute
                     break
                 except Exception as exc2:
                     last_cpu_exc = exc2
@@ -110,8 +112,8 @@ def load_whisper_model():
         logger.info(
             "faster-whisper loaded (src=%s, device=%s, compute=%s)",
             model_src,
-            _DEVICE,
-            _COMPUTE_TYPE,
+            loaded_device,
+            loaded_compute,
         )
         return _model
 

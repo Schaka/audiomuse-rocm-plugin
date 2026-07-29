@@ -69,9 +69,12 @@ def _fp16_capable():
 # option: passing it fails session creation with "Invalid MIGraphX EP option:
 # migraphx_model_cache_dir" and ORT silently falls back to CPUExecutionProvider.
 # Confirmed by `strings` on the shipped onnxruntime .so - it has no
-# migraphx_model_cache_dir symbol, but does have the older, pre-cache-dir pair
-# of options: migraphx_save_compiled_model(_path) / migraphx_load_compiled_model
-# (_path). Those still work, they just take one fixed file per session instead
+# migraphx_model_cache_dir symbol, but does have the older, pre-cache-dir
+# option set: migraphx_save_compiled_model / migraphx_save_model_path (and the
+# load_ counterparts) - note the path keys do NOT repeat "compiled": it's
+# migraphx_save_model_path, not migraphx_save_compiled_model_path (the latter
+# is rejected as an invalid option and silently drops the whole EP to CPU).
+# Those options still work, they just take one fixed file per session instead
 # of auto-keying a whole directory, hence _compiled_model_options() below doing
 # by hand what migraphx_model_cache_dir would otherwise do for it. Every other
 # arch here is on the ROCm 7 base, which has migraphx_model_cache_dir.
@@ -135,11 +138,11 @@ def _compiled_model_options(model_label, fp16):
     if os.path.exists(path):
         return {
             "migraphx_load_compiled_model": "True",
-            "migraphx_load_compiled_model_path": path,
+            "migraphx_load_model_path": path,
         }
     return {
         "migraphx_save_compiled_model": "True",
-        "migraphx_save_compiled_model_path": path,
+        "migraphx_save_model_path": path,
     }
 
 

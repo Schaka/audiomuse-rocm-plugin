@@ -66,8 +66,9 @@ Both sets stay valid across a flip, so switching back costs no recompile.
 EP predates `migraphx_model_cache_dir` - passing it fails session creation
 outright and ORT falls back to CPU. The plugin detects this by GPU arch
 (`torch.cuda.get_device_properties(0).gcnArchName`) and instead uses the
-older `migraphx_save_compiled_model(_path)` / `migraphx_load_compiled_model
-(_path)` options, one file per model under the same fp16/fp32 subdirectory
+older `migraphx_save_compiled_model`/`migraphx_save_model_path` and
+`migraphx_load_compiled_model`/`migraphx_load_model_path` options (the path
+keys do not repeat "compiled"), one file per model under the same fp16/fp32 subdirectory
 (`musicnn.mxr`, `clap.mxr`). Unlike `migraphx_model_cache_dir` there's no
 graph-id hash check on that file, so a stale one from a since-changed model
 or input shape would load wrong - delete it (or the whole subdirectory) to
