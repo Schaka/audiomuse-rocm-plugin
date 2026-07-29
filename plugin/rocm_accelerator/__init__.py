@@ -33,6 +33,35 @@ logger = logging.getLogger("plugin.rocm_accelerator")
 
 MIGRAPHX_CACHE_ROOT = "/app/.cache/migraphx"
 
+# GCN 4 (Polaris - gfx803/802/805, e.g. RX 470/480/570/580) has no packed FP16
+# throughput: FP16 math runs at a fraction of FP32 rate (or is emulated), so
+# migraphx_fp16_enable buys no speedup and only adds precision risk. Packed
+# FP16 starts at Vega (gfx900) and is present on every RDNA/CDNA part since.
+NO_PACKED_FP16_ARCHES = {"gfx803", "gfx802", "gfx805"}
+
+
+def _gpu_arch():
+    # torch is baked into the ROCm base image (rocm-*-ort-torch-builder), so
+    # this is available whenever MIGraphX is; gcnArchName looks like
+    # "gfx803:sramecc-:xnack-" - only the part before ':' identifies the arch.
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    except Exception:
+        return None
+
+
+def _fp16_capable():
+    arch = _gpu_arch()
+    if arch is None:
+        # Unknown - don't block a setting we can't verify; the arch's own EP
+        # session creation is the backstop if fp16 truly isn't supported.
+        return True
+    return arch not in NO_PACKED_FP16_ARCHES
+
 
 def _asr_factory():
     # Imported lazily on the worker so non-ROCm containers never touch it.
@@ -87,12 +116,19 @@ def register(ctx):
     # with fp16 both on and off, so it isn't fp16-specific - disabling fp16 buys
     # no safety, just throughput. Opt out via the plugin's settings if needed.
     fp16 = get_setting("fp16_enable", True)
+    if fp16 and not _fp16_capable():
+        logger.warning(
+            "GPU arch %s has no packed FP16 throughput - ignoring fp16_enable "
+            "and running MIGraphX in fp32.",
+            _gpu_arch(),
+        )
+        fp16 = False
     options = {
         "device_id": 0,
         "migraphx_model_cache_dir": _model_cache_dir(fp16),
     }
     if fp16:
-        options["migraphx_fp16_enable"] = "1"
+        options["migraphx_fp16_enable"] = "True"
 
     # needs_static_shapes tells core to pin the CLAP audio model's symbolic time
     # axis before it builds the session; MIGraphX cannot compile a dynamic dim.

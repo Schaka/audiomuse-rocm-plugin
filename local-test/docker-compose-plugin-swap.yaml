@@ -1,0 +1,156 @@
+# AudioMuse-AI ROCm Accelerator plugin - test against a PUBLISHED worker image.
+#
+# Unlike docker-compose-rocm.yaml, this does NOT build docker/Dockerfile.
+# It pulls an already-published ghcr.io/schaka/audiomuse-ai-rocm worker image
+# (default: gfx803/Polaris) and bind-mounts this repo's plugin source straight
+# into /app/plugin/installed/rocm_accelerator, bypassing the plugin-catalog
+# install flow entirely. Edits to plugin/rocm_accelerator/*.py take effect on
+# worker restart - no image rebuild needed. Use this to test plugin code
+# changes against a worker image you already trust; use docker-compose-rocm.yaml
+# when you need to change the Dockerfile/base image itself.
+#
+# Usage (from this repo's root):
+#   docker compose -f local-test/docker-compose-plugin-swap.yaml up
+#
+# To test a different published tag/arch:
+#   WORKER_IMAGE=ghcr.io/schaka/audiomuse-ai-rocm:unstable-gfx1030 \
+#     docker compose -f local-test/docker-compose-plugin-swap.yaml up
+#
+# The Flask app runs the plain published CORE_IMAGE, not the ROCm image - the
+# plugin targets "worker" only (plugin.json's targets), so Flask needs no GPU
+# passthrough. It's here so you have a UI at :8000 to install the plugin and
+# queue analysis jobs against the swapped-in worker.
+#
+# Plugin install goes through the real path, same as docker-compose-rocm.yaml:
+# a local plugin-catalog sidecar zips up plugin/rocm_accelerator and serves it
+# over HTTP, so the app installs/applies it exactly like it would a real
+# repository entry - no bind-mount into /app/plugin/installed, no DB rows
+# faked by hand. In the web UI (http://localhost:8000):
+#   1. Log in as admin, open Plugins > Repositories.
+#   2. Add repository: http://plugin-catalog:8099/manifest.json
+#   3. Catalog tab > install "ROCm Accelerator (AMD)" > Apply now (restart).
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: audiomuse-redis-swap
+    environment:
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: audiomuse-postgres-swap
+    environment:
+      TZ: "${TZ:-UTC}"
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Serves a local plugin catalog derived from plugin/rocm_accelerator so the
+  # plugin can be installed from the UI without a public repository. Same
+  # sidecar as docker-compose-rocm.yaml.
+  plugin-catalog:
+    image: python:3.12-alpine
+    container_name: audiomuse-plugin-catalog-swap
+    working_dir: /src
+    volumes:
+      - ..:/src:ro
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /catalog
+        cd /src/plugin
+        python -m zipfile -c /catalog/rocm_accelerator.zip rocm_accelerator
+        python -c "import json; d=json.load(open('/src/plugin/rocm_accelerator/plugin.json')); b='http://plugin-catalog:8099'; v=[{'version':d['version'],'min_core_version':d.get('min_core_version'),'changelog':d.get('changelog',''),'sourceUrl':b+'/rocm_accelerator.zip'}]; json.dump({'id':d['id'],'name':d['name'],'author':d['author'],'description':d['description'],'targets':d.get('targets',[]),'requirements':d.get('requirements',[]),'versions':v},open('/catalog/plugin.json','w')); m={'plugins':[{'id':d['id'],'name':d['name'],'author':d['author'],'description':d['description'],'pluginUrl':b+'/plugin.json'}]}; json.dump(m,open('/catalog/manifest.json','w'))"
+        cd /catalog
+        exec python -m http.server 8099
+    restart: unless-stopped
+
+  audiomuse-ai-flask:
+    image: ${CORE_IMAGE:-ghcr.io/neptunehub/audiomuse-ai:latest}
+    container_name: audiomuse-ai-flask-swap
+    ports:
+      - "${FRONTEND_PORT:-8000}:8000"
+    environment:
+      SERVICE_TYPE: "flask"
+      TZ: "${TZ:-UTC}"
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+      TEMP_DIR: "/app/temp_audio"
+    volumes:
+      - temp-audio-flask:/app/temp_audio
+      - plugins-flask:/app/plugin/installed
+    depends_on:
+      - redis
+      - postgres
+      - plugin-catalog
+    restart: unless-stopped
+
+  audiomuse-ai-worker:
+    image: ${WORKER_IMAGE:-ghcr.io/schaka/audiomuse-ai-rocm:latest-gfx803}
+    container_name: audiomuse-ai-worker-swap
+    environment:
+      SERVICE_TYPE: "worker"
+      TZ: "${TZ:-UTC}"
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres"
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+      TEMP_DIR: "/app/temp_audio"
+      # cuML has no ROCm port; GPU clustering stays CPU. ONNX analysis uses the GPU.
+      USE_GPU_CLUSTERING: "false"
+      # Uncomment to pin to a specific AMD GPU (index or UUID):
+      # HIP_VISIBLE_DEVICES: "0"
+    # --- AMD GPU passthrough ---
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # Base image has no `render` group; pass host's numeric GIDs instead.
+    # Find yours with: getent group render video
+    group_add:
+      - "${RENDER_GID:-105}"
+      - "${VIDEO_GID:-39}"
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    cap_add:
+      - SYS_PTRACE
+    volumes:
+      - temp-audio-worker:/app/temp_audio
+      - plugins-worker:/app/plugin/installed
+      # Same cache volumes as docker-compose-rocm.yaml - see that file's
+      # comments for why they're persisted.
+      - miopen-cache:/app/.cache/miopen
+      - migraphx-cache:/app/.cache/migraphx
+    depends_on:
+      - redis
+      - postgres
+      - plugin-catalog
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:
+  temp-audio-flask:
+  temp-audio-worker:
+  plugins-flask:
+  plugins-worker:
+  miopen-cache:
+  migraphx-cache:
