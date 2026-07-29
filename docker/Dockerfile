@@ -84,9 +84,21 @@ RUN set -eux; \
 #     transcribe with "no kernel image is available". Building the same
 #     upstream source for the actual arch is the whole fix - no fork needed.
 #
-# WITH_CUDNN is off: it maps to MIOpen on ROCm, which has patchy Polaris
-# support, and CTranslate2 does not need it. OpenBLAS provides the CPU backend
-# in place of MKL, matching the runtime libs the final image installs.
+# WITH_CUDNN=ON on the arlo-phoenix fork (gfx803): despite the CUDA-flavoured
+# name, this is what actually enables their from-scratch MIOpen backend for
+# Conv1D - hipDNN (the old cuDNN-alike) is unmaintained, so upstream CTranslate2
+# has no HIP path for Conv1D at all, and Whisper's encoder opens with two
+# Conv1D layers. Leaving this off (as an earlier version of this Dockerfile
+# did) builds fine and imports fine, but every GPU transcribe then fails at
+# the first Conv1D with "Conv1D on GPU currently requires the cuDNN library
+# which is not integrated in this build" - a runtime failure invisible at
+# build time. MIOpen itself is inherited unmodified from the ROCm base image
+# (see rocm-migraphx-ort-builder/gfx803/Dockerfile.gfx803), so no extra
+# packages are needed here for CMake to find it.
+# Upstream OpenNMT/CTranslate2 (gfx9xx) has no such backend - it doesn't carry
+# arlo-phoenix's patch - so WITH_CUDNN stays off there; turning it on would
+# just fail to find a real cudnn.h. OpenBLAS provides the CPU backend in place
+# of MKL, matching the runtime libs the final image installs.
 # OPENMP_RUNTIME defaults to INTEL, which hard-fails on missing libiomp5 - that
 # only ships with MKL, so it has to follow WITH_MKL=OFF over to the compiler's
 # own libgomp.
@@ -121,6 +133,10 @@ RUN set -eux; \
     llvm_bin="$(hipconfig -l)"; \
     export HIPCXX="${llvm_bin}/clang"; \
     export HIP_PATH="$(hipconfig -R)"; \
+    case "${CT2_REPO}" in \
+        *arlo-phoenix*) with_cudnn=ON ;; \
+        *) with_cudnn=OFF ;; \
+    esac; \
     cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -131,7 +147,7 @@ RUN set -eux; \
         -DWITH_OPENBLAS=ON \
         -DOPENMP_RUNTIME=COMP \
         -DWITH_HIP=ON \
-        -DWITH_CUDNN=OFF \
+        -DWITH_CUDNN="${with_cudnn}" \
         -DCMAKE_HIP_ARCHITECTURES="${ROCM_ARCH}" \
         -DBUILD_CLI=OFF \
         -DBUILD_TESTS=OFF; \
