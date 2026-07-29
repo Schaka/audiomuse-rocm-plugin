@@ -62,6 +62,23 @@ _model_dir: Optional[str] = None
 _load_lock = threading.Lock()
 
 
+def _vram_status() -> str:
+    # torch is baked into the ROCm base image (same one the plugin's __init__
+    # uses for arch detection), so this is available whenever CTranslate2 is.
+    # mem_get_info reports what HIP itself thinks is free, independent of
+    # whatever CTranslate2's own allocator is doing - the number that tells
+    # us whether a GPU OOM here is real or a driver/allocator false report.
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return "vram: no CUDA/HIP device visible to torch"
+        free_b, total_b = torch.cuda.mem_get_info(0)
+        return f"vram: {free_b / 2**20:.0f}MiB free / {total_b / 2**20:.0f}MiB total"
+    except Exception as exc:
+        return f"vram: unavailable ({exc})"
+
+
 class WhisperLoadRefused(RuntimeError):
     """Raised when the model cannot be loaded; transcribe() degrades to empty."""
 
@@ -87,12 +104,20 @@ def load_whisper_model():
             # tried first for speed, but CTranslate2 only has an int8 CPU kernel
             # when it was built against oneDNN/MKL - the source builds (gfx803,
             # gfx9xx) are OpenBLAS-only and raise here, so float32 backs it up.
+            #
+            # A GPU load failing with "out of memory" on a card with plenty of
+            # free VRAM points at a CTranslate2-rocm/HIP allocator bug rather
+            # than real contention (see OpenNMT/CTranslate2#2021 for the same
+            # symptom on gfx1201) - log actual free/total VRAM here so that's
+            # distinguishable from a genuinely full card without needing to
+            # reproduce on the hardware.
             logger.warning(
                 "faster-whisper GPU load failed (device=%s, compute=%s): %s - "
-                "falling back to CPU",
+                "falling back to CPU (%s)",
                 _DEVICE,
                 _COMPUTE_TYPE,
                 exc,
+                _vram_status(),
             )
             for cpu_compute in ("int8", "float32"):
                 try:
