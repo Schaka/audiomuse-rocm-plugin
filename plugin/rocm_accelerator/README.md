@@ -62,6 +62,17 @@ provider at a per-precision subdirectory - `/app/.cache/migraphx/fp16` or
 precision's artifacts as cache hits and silently run at the wrong precision.
 Both sets stay valid across a flip, so switching back costs no recompile.
 
+**gfx803 (ROCm 6.4.4) exception:** that base's onnxruntime (1.21.1) MIGraphX
+EP predates `migraphx_model_cache_dir` - passing it fails session creation
+outright and ORT falls back to CPU. The plugin detects this by GPU arch
+(`torch.cuda.get_device_properties(0).gcnArchName`) and instead uses the
+older `migraphx_save_compiled_model(_path)` / `migraphx_load_compiled_model
+(_path)` options, one file per model under the same fp16/fp32 subdirectory
+(`musicnn.mxr`, `clap.mxr`). Unlike `migraphx_model_cache_dir` there's no
+graph-id hash check on that file, so a stale one from a since-changed model
+or input shape would load wrong - delete it (or the whole subdirectory) to
+force a recompile.
+
 `/app/.cache/migraphx` is a named volume in `local-test/docker-compose-rocm.yaml`;
 the ROCm entrypoint wrapper clears it (subdirectories included) when the image's
 MIGraphX build changes.

@@ -63,6 +63,28 @@ def _fp16_capable():
     return arch not in NO_PACKED_FP16_ARCHES
 
 
+# gfx803's base is ROCm 6.4.4 (see image-build.yml / docker/Dockerfile's ct2
+# stage comments - gfx803 is the one arch still on a ROCm 6 base). Its
+# onnxruntime (1.21.1) MIGraphX EP build predates the migraphx_model_cache_dir
+# option: passing it fails session creation with "Invalid MIGraphX EP option:
+# migraphx_model_cache_dir" and ORT silently falls back to CPUExecutionProvider.
+# Confirmed by `strings` on the shipped onnxruntime .so - it has no
+# migraphx_model_cache_dir symbol, but does have the older, pre-cache-dir pair
+# of options: migraphx_save_compiled_model(_path) / migraphx_load_compiled_model
+# (_path). Those still work, they just take one fixed file per session instead
+# of auto-keying a whole directory, hence _compiled_model_options() below doing
+# by hand what migraphx_model_cache_dir would otherwise do for it. Every other
+# arch here is on the ROCm 7 base, which has migraphx_model_cache_dir.
+NO_MODEL_CACHE_DIR_ARCHES = {"gfx803"}
+
+
+def _model_cache_dir_supported():
+    arch = _gpu_arch()
+    if arch is None:
+        return True
+    return arch not in NO_MODEL_CACHE_DIR_ARCHES
+
+
 def _asr_factory():
     # Imported lazily on the worker so non-ROCm containers never touch it.
     from . import whisper_faster
@@ -88,7 +110,7 @@ def _faster_whisper_available():
         return False
 
 
-def _model_cache_dir(fp16):
+def _cache_dir(fp16):
     # MIGraphX keys its .mxr artifacts on MIGraphX version, graph id, GPU arch and
     # input shapes - not on precision. An fp32 artifact would therefore be loaded
     # as a hit after switching fp16 on, silently running the wrong precision. One
@@ -98,6 +120,27 @@ def _model_cache_dir(fp16):
     # directory raises out of session creation rather than just skipping the save.
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
+
+
+def _compiled_model_options(model_label, fp16):
+    # gfx803 fallback for _model_cache_dir(): migraphx_save/load_compiled_model
+    # each take one literal file, not a directory MIGraphX can key by graph id
+    # itself - so this does that keying by hand, one file per (model, precision).
+    # Existence of the file is the only signal available: first run for a given
+    # model/precision writes it (save), every run after reads it back (load).
+    # There's no hash-of-the-graph check like migraphx_model_cache_dir does, so
+    # a stale file from a since-changed model/shape would load wrong - delete
+    # the file (or the whole fp16/fp32 subdir) to force a recompile.
+    path = os.path.join(_cache_dir(fp16), f"{model_label}.mxr")
+    if os.path.exists(path):
+        return {
+            "migraphx_load_compiled_model": "True",
+            "migraphx_load_compiled_model_path": path,
+        }
+    return {
+        "migraphx_save_compiled_model": "True",
+        "migraphx_save_compiled_model_path": path,
+    }
 
 
 def register(ctx):
@@ -123,10 +166,7 @@ def register(ctx):
             _gpu_arch(),
         )
         fp16 = False
-    options = {
-        "device_id": 0,
-        "migraphx_model_cache_dir": _model_cache_dir(fp16),
-    }
+    options = {"device_id": 0}
     if fp16:
         options["migraphx_fp16_enable"] = "True"
 
@@ -134,12 +174,38 @@ def register(ctx):
     # axis before it builds the session; MIGraphX cannot compile a dynamic dim.
     # Core does not know this provider's name, so without the flag CLAP would be
     # handed the dynamic graph and fail to compile.
-    ctx.register_onnx_provider(
-        "MIGraphXExecutionProvider",
-        options,
-        only_models=["musicnn", "clap"],
-        needs_static_shapes=True,
-    )
+    if _model_cache_dir_supported():
+        options["migraphx_model_cache_dir"] = _cache_dir(fp16)
+        ctx.register_onnx_provider(
+            "MIGraphXExecutionProvider",
+            options,
+            only_models=["musicnn", "clap"],
+            needs_static_shapes=True,
+        )
+    else:
+        # No migraphx_model_cache_dir on this EP build: fall back to explicit
+        # save/load-compiled-model file paths, which core's options dict is
+        # per-registration, not per-session - so each model needs its own
+        # registration (and its own file) rather than one shared dict, or
+        # musicnn and clap would fight over the same compiled-model file.
+        # resolve_providers() in core only matches the entry whose only_models
+        # names the session's label, so registering the same provider name
+        # twice like this is safe - each session only ever sees one of them.
+        for label in ("musicnn", "clap"):
+            model_options = dict(options)
+            model_options.update(_compiled_model_options(label, fp16))
+            ctx.register_onnx_provider(
+                "MIGraphXExecutionProvider",
+                model_options,
+                only_models=[label],
+                needs_static_shapes=True,
+            )
+        logger.warning(
+            "GPU arch %s's MIGraphX EP predates migraphx_model_cache_dir - "
+            "using migraphx_save/load_compiled_model per model instead "
+            "(delete /app/.cache/migraphx to force a recompile).",
+            _gpu_arch(),
+        )
     logger.info(
         "Registered MIGraphX ONNX provider for musicnn and CLAP audio (AMD GPU, fp16=%s)",
         options.get("migraphx_fp16_enable", "0"),
