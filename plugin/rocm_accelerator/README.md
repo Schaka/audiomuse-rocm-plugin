@@ -94,6 +94,33 @@ without this plugin.
 the ROCm entrypoint wrapper clears it (subdirectories included) when the image's
 MIGraphX build changes.
 
+## CLAP audio: ROCMExecutionProvider fallback (gfx803 only)
+
+CLAP's audio encoder has a Resize node that exports an explicit
+`keep_aspect_ratio_policy` attribute (opset-19 exporter behavior). gfx803's
+MIGraphX is pinned to `release/rocm-rel-6.4`
+(`rocm-migraphx-ort-builder/gfx803/Dockerfile.gfx803`'s `MIGRAPHX_REF`), whose
+ONNX parser throws on that attribute's mere presence - regardless of its value
+or whether the graph's shapes are static or dynamic
+(`parse_resize.cpp`: `"keep_aspect_ratio_policy is not supported!"`) - so CLAP
+can never compile under `MIGraphXExecutionProvider` there; only musicnn
+benefits from that provider on gfx803.
+
+This is fixed upstream: MIGraphX's `develop` branch (what the ROCm 7 base for
+gfx9xx/gfx1030+ builds against) added real support for the attribute
+(`stretch`/absent is accepted; other policies still throw, now with a clearer
+message), which is why this has not been seen on RX 9070 XT (gfx1201) or other
+newer-base arches - CLAP compiles fine there.
+
+Where the plain kernel-based `ROCMExecutionProvider` is available (gfx803's
+ORT build, 1.21.1, still ships it alongside MIGraphX as a fallback for graphs
+MIGraphX can't compile there - the ROCm 7 base used for gfx9xx/gfx1030+ dropped
+it, keeping only MIGraphX), the plugin registers it as a CLAP-only fallback
+after the MIGraphX entry: it runs Resize as an ordinary op rather than parsing
+the graph ahead of time, so the attribute is a non-issue, and no static-shape
+pinning or fp16 flags are needed. `_rocm_ep_available()` naturally scopes this
+to gfx803 today without hardcoding the arch.
+
 ## Env (set by the ROCm image, override if needed)
 
 - `LYRICS_WHISPER_FASTER_DEVICE` (default `cuda`; CTranslate2 mirrors the CUDA

@@ -120,6 +120,21 @@ def _migraphx_available():
         return False
 
 
+def _rocm_ep_available():
+    # Only gfx803's ORT build (1.21.1) still carries the plain kernel-based
+    # ROCMExecutionProvider alongside MIGraphX (see rocm-migraphx-ort-builder's
+    # gfx803/Dockerfile.gfx803: --use_rocm is passed there as a fallback for
+    # graphs MIGraphX can't compile - gfx803 has no CK/MLIR to fuse with). Later
+    # ORT builds (the ROCm 7 base used for gfx9xx/gfx1030+) dropped it, so this
+    # check alone scopes the fallback below to where it actually exists.
+    try:
+        import onnxruntime as ort
+
+        return "ROCMExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
+
+
 def _faster_whisper_available():
     try:
         import faster_whisper  # noqa: F401
@@ -229,6 +244,29 @@ def register(ctx):
         "Registered MIGraphX ONNX provider for musicnn and CLAP audio (AMD GPU, fp16=%s)",
         options.get("migraphx_fp16_enable", "0"),
     )
+
+    # CLAP audio's Resize node exports an explicit keep_aspect_ratio_policy
+    # attribute (opset-19 exporter behavior). gfx803's MIGraphX is pinned to
+    # release/rocm-rel-6.4 (see MIGRAPHX_REF in rocm-migraphx-ort-builder's
+    # gfx803/Dockerfile.gfx803), whose ONNX parser throws on that attribute's
+    # mere presence regardless of value or static/dynamic shape
+    # (parse_resize.cpp: "keep_aspect_ratio_policy is not supported!") - so
+    # CLAP can never compile there; only musicnn benefits from the entry
+    # above. This is fixed upstream on MIGraphX's develop branch (stretch/
+    # absent now accepted), which is what the ROCm 7 base for gfx9xx/gfx1030+
+    # builds against - CLAP compiles fine there, e.g. RX 9070 XT/gfx1201.
+    # Where the plain kernel-based ROCMExecutionProvider is available (gfx803's
+    # ORT build only - see _rocm_ep_available), register it as a CLAP-only
+    # fallback: it runs Resize as an ordinary op instead of parsing the graph
+    # ahead of time, so the attribute is a non-issue. No fp16/static-shape
+    # options needed - it handles dynamic dims natively.
+    if _rocm_ep_available():
+        ctx.register_onnx_provider(
+            "ROCMExecutionProvider",
+            {"device_id": 0},
+            only_models=["clap"],
+        )
+        logger.info("Registered ROCMExecutionProvider fallback for CLAP audio (AMD GPU)")
 
     if _faster_whisper_available():
         ctx.register_analysis_provider("asr", _asr_factory)
