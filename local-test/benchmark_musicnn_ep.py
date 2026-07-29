@@ -13,10 +13,14 @@ librosa - all already present there):
     docker cp local-test/benchmark_musicnn_ep.py <worker-container>:/tmp/bench.py
     docker exec -it <worker-container> python3 /tmp/bench.py
 
-By default it synthesizes several distinct audio samples (sine sweep, chord
-stack, pink noise, silence-padded transient) at a few durations - no download,
-no network access needed, fully reproducible. Point it at real files instead
-with --audio-dir if you'd rather test your own library.
+By default it downloads two short, verified-license real music clips from
+Wikimedia Commons (CC0/public domain, confirmed resolving and licensed as of
+writing - see DOWNLOAD_SAMPLES below) and caches them locally, truncated to
+15s each to keep runs quick. If the container has no network egress, it falls
+back to synthesizing two short samples instead (sine sweep, pink noise) - no
+download, no network, fully reproducible either way. Pass --no-download to
+force synthetic, or --audio-dir to point at your own real files instead
+(overrides both).
 
 Preprocessing (mel-spectrogram patching) is NOT timed - only the two
 session.run() calls are, since that's the only thing that differs between
@@ -86,9 +90,12 @@ def prepare_spectrogram_patches(audio: np.ndarray, sr: int) -> np.ndarray | None
     return np.array(patches).transpose(0, 2, 1).astype(np.float32)
 
 
+SAMPLE_DURATION_S = 12  # kept short: at ~32s/inference observed on gfx803,
+                        # even 2 samples x 1 warmup + 3 timed runs adds up fast
+
+
 def synthesize_samples() -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
-    samples = {}
 
     def sine_sweep(duration):
         t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
@@ -96,12 +103,6 @@ def synthesize_samples() -> dict[str, np.ndarray]:
         k = (f1 / f0) ** (1.0 / duration)
         phase = 2 * np.pi * f0 * (k**t - 1) / np.log(k)
         return 0.5 * np.sin(phase).astype(np.float32)
-
-    def chord_stack(duration):
-        t = np.linspace(0, duration, int(SAMPLE_RATE * duration), endpoint=False)
-        freqs = [220.0, 277.18, 329.63, 440.0]  # A3 minor-ish stack
-        wave = sum(np.sin(2 * np.pi * f * t) for f in freqs)
-        return (0.3 * wave / len(freqs)).astype(np.float32)
 
     def pink_noise(duration):
         n = int(SAMPLE_RATE * duration)
@@ -111,22 +112,46 @@ def synthesize_samples() -> dict[str, np.ndarray]:
         pink = pink / np.max(np.abs(pink))
         return (0.2 * pink).astype(np.float32)
 
-    def transient_bursts(duration):
-        n = int(SAMPLE_RATE * duration)
-        audio = np.zeros(n, dtype=np.float32)
-        t_burst = np.linspace(0, 0.05, int(SAMPLE_RATE * 0.05), endpoint=False)
-        burst = (0.8 * np.sin(2 * np.pi * 1000 * t_burst) * np.hanning(len(t_burst))).astype(
-            np.float32
-        )
-        for start in range(0, n - len(burst), SAMPLE_RATE // 2):
-            audio[start : start + len(burst)] += burst
-        return audio
+    return {
+        f"sine_sweep_{SAMPLE_DURATION_S}s": sine_sweep(SAMPLE_DURATION_S),
+        f"pink_noise_{SAMPLE_DURATION_S}s": pink_noise(SAMPLE_DURATION_S),
+    }
 
-    # Kept deliberately small: at ~32s/inference observed on gfx803, even 2
-    # samples x 1 warmup + 3 timed runs is ~4min per provider. Bump duration
-    # tuple / add sample types back if you want a more thorough pass later.
-    samples["sine_sweep_30s"] = sine_sweep(30)
-    samples["pink_noise_30s"] = pink_noise(30)
+
+# Verified (HTTP 200 + license checked) 2026-07-29. Both short, real music,
+# clearly licensed for this kind of use - not guessed/fabricated URLs.
+DOWNLOAD_SAMPLES = {
+    # CC0 1.0, 14s, "8 bars of a drift phonk instrumental at 140 BPM" (Zanahary, 2023)
+    "phonk_sample": "https://upload.wikimedia.org/wikipedia/commons/2/2c/Phonk_sample.ogg",
+    # Public domain, bansuri (Indian bamboo flute) recording, truncated to 15s on load
+    "bansuri_sample": "https://upload.wikimedia.org/wikipedia/commons/1/1f/Sample2.ogg",
+}
+
+
+def download_samples(cache_dir: str, max_duration: float = 15.0) -> dict[str, np.ndarray] | None:
+    import urllib.error
+    import urllib.request
+
+    import librosa
+
+    os.makedirs(cache_dir, exist_ok=True)
+    samples = {}
+    for name, url in DOWNLOAD_SAMPLES.items():
+        local_path = os.path.join(cache_dir, name + ".ogg")
+        if not os.path.exists(local_path):
+            print(f"Downloading {name} from {url} ...", file=sys.stderr)
+            try:
+                with urllib.request.urlopen(url, timeout=15) as resp, open(local_path, "wb") as f:
+                    f.write(resp.read())
+            except (urllib.error.URLError, OSError) as exc:
+                print(f"Download failed ({exc}) - falling back to synthetic samples.", file=sys.stderr)
+                return None
+        try:
+            audio, _ = librosa.load(local_path, sr=SAMPLE_RATE, mono=True, duration=max_duration)
+        except Exception as exc:
+            print(f"Failed to decode {local_path}: {exc} - falling back to synthetic samples.", file=sys.stderr)
+            return None
+        samples[name] = audio.astype(np.float32)
     return samples
 
 
@@ -223,7 +248,9 @@ def fmt_ms(values):
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audio-dir", help="Directory of real audio files (overrides synthetic samples)")
+    parser.add_argument("--audio-dir", help="Directory of real audio files (overrides download/synthetic samples)")
+    parser.add_argument("--no-download", action="store_true", help="Skip downloading sample clips, use synthetic samples instead")
+    parser.add_argument("--sample-cache-dir", default="/tmp/musicnn_bench_audio_cache", help="Where downloaded sample clips are cached")
     parser.add_argument("--embedding-model", default="/app/model/musicnn_embedding.onnx")
     parser.add_argument("--prediction-model", default="/app/model/musicnn_prediction.onnx")
     parser.add_argument("--runs", type=int, default=3, help="Timed runs per sample per provider")
@@ -242,7 +269,12 @@ def build_arg_parser():
 
 def run_one_provider(provider: str, args) -> dict:
     """Benchmark a single provider against every sample. Returns a JSON-able dict."""
-    samples = load_real_samples(args.audio_dir) if args.audio_dir else synthesize_samples()
+    if args.audio_dir:
+        samples = load_real_samples(args.audio_dir)
+    elif args.no_download:
+        samples = synthesize_samples()
+    else:
+        samples = download_samples(args.sample_cache_dir) or synthesize_samples()
     out = {"times": {}, "cold_ms": {}}
 
     for sample_name, audio in samples.items():
@@ -337,9 +369,12 @@ def main():
         "--warmup", str(args.warmup),
         "--batch-size", str(args.batch_size),
         "--cache-dir", args.cache_dir,
+        "--sample-cache-dir", args.sample_cache_dir,
     ]
     if args.fp16:
         passthrough.append("--fp16")
+    if args.no_download:
+        passthrough.append("--no-download")
     if args.audio_dir:
         passthrough += ["--audio-dir", args.audio_dir]
 
