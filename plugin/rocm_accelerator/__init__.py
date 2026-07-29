@@ -26,6 +26,7 @@ other image the plugin registers nothing and stays inert.
 
 import logging
 import os
+import subprocess
 
 from plugin.api import get_setting
 
@@ -41,17 +42,32 @@ NO_PACKED_FP16_ARCHES = {"gfx803", "gfx802", "gfx805"}
 
 
 def _gpu_arch():
-    # torch is baked into the ROCm base image (rocm-*-ort-torch-builder), so
-    # this is available whenever MIGraphX is; gcnArchName looks like
-    # "gfx803:sramecc-:xnack-" - only the part before ':' identifies the arch.
+    # Deliberately shells out to rocminfo instead of asking torch.cuda: this
+    # runs from register(), which fires once in the persistent RQ worker
+    # process at startup - well before RQ fork()s a fresh child ("horse", per
+    # RQ's own log lines) to actually run each job. A HIP/CUDA context does
+    # not survive fork() cleanly; touching torch.cuda here would initialize
+    # one in the long-lived parent, and every forked child then inherits a
+    # driver handle that looks initialized but isn't, so the child's first
+    # real GPU call (MIGraphX's hipMemGetInfo) fails with a generic-looking
+    # "invalid argument" - exactly the failure this was chasing, and the
+    # same root cause behind the "Cannot re-initialize CUDA in forked
+    # subprocess" warning core already logs elsewhere. rocminfo is a separate
+    # process with its own address space, so parsing its text output detects
+    # the arch without initializing anything in this one.
     try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return None
-        return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+        out = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=10, check=True
+        ).stdout
     except Exception:
         return None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Name:"):
+            name = line.split(":", 1)[1].strip()
+            if name.startswith("gfx"):
+                return name
+    return None
 
 
 def _fp16_capable():

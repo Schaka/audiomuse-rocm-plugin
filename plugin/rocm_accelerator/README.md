@@ -65,7 +65,8 @@ Both sets stay valid across a flip, so switching back costs no recompile.
 **gfx803 (ROCm 6.4.4) exception:** that base's onnxruntime (1.21.1) MIGraphX
 EP predates `migraphx_model_cache_dir` - passing it fails session creation
 outright and ORT falls back to CPU. The plugin detects this by GPU arch
-(`torch.cuda.get_device_properties(0).gcnArchName`) and instead uses the
+(shelling out to `rocminfo`, not `torch.cuda` - see the "Why rocminfo, not
+torch.cuda" note below) and instead uses the
 older `migraphx_save_compiled_model`/`migraphx_save_model_path` and
 `migraphx_load_compiled_model`/`migraphx_load_model_path` options (the path
 keys do not repeat "compiled"), one file per model under the same fp16/fp32 subdirectory
@@ -73,6 +74,21 @@ keys do not repeat "compiled"), one file per model under the same fp16/fp32 subd
 graph-id hash check on that file, so a stale one from a since-changed model
 or input shape would load wrong - delete it (or the whole subdirectory) to
 force a recompile.
+
+**Why rocminfo, not torch.cuda:** `register()` runs once in the persistent RQ
+worker process at startup, before RQ forks a fresh child process per job (RQ
+calls these "horse" processes in its own logs). A HIP/CUDA context does not
+survive `fork()` cleanly - initializing one in the long-lived parent (which
+`torch.cuda.get_device_properties()` does) leaves every forked child with a
+driver handle that looks initialized but isn't, so the child's first real GPU
+call fails with a generic-looking error (MIGraphX's `hipMemGetInfo` raising
+"Failed getting available memory: invalid argument" was the actual symptom
+this caused here) - the same root cause behind the "Cannot re-initialize CUDA
+in forked subprocess" warning core already logs elsewhere. `rocminfo` is a
+separate process, so parsing its text output detects the arch without
+initializing anything in the worker process itself, leaving GPU init to
+happen for the first time in the actual job's forked child, same as it does
+without this plugin.
 
 `/app/.cache/migraphx` is a named volume in `local-test/docker-compose-rocm.yaml`;
 the ROCm entrypoint wrapper clears it (subdirectories included) when the image's
