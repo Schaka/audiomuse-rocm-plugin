@@ -204,6 +204,32 @@ def register(ctx):
     if fp16:
         options["migraphx_fp16_enable"] = "True"
 
+    # CLAP audio's Resize node exports an explicit keep_aspect_ratio_policy
+    # attribute (opset-19 exporter behavior). gfx803's MIGraphX is pinned to
+    # release/rocm-rel-6.4 (see MIGRAPHX_REF in rocm-migraphx-ort-builder's
+    # gfx803/Dockerfile.gfx803), whose ONNX parser throws on that attribute's
+    # mere presence regardless of value or static/dynamic shape
+    # (parse_resize.cpp: "keep_aspect_ratio_policy is not supported!"). This
+    # is fixed upstream on MIGraphX's develop branch (stretch/absent now
+    # accepted), which is what the ROCm 7 base for gfx9xx/gfx1030+ builds
+    # against - CLAP compiles fine there, e.g. RX 9070 XT/gfx1201 - so this
+    # only matters where _rocm_ep_available() is true (gfx803 today).
+    #
+    # Putting MIGraphX and ROCMExecutionProvider in the SAME session for CLAP
+    # was tried and is unsafe: confirmed on real gfx803 hardware to SIGSEGV
+    # (exit 139) the whole worker process, not raise a catchable exception.
+    # MIGraphX does real GPU work on the rest of the graph before reaching
+    # the unsupported Resize node, and handing that node off to ROCM within
+    # the same session corrupts the HIP module table - repro'd in isolation
+    # via repro_clap_provider_chain.py in local-test/. So on arches where the
+    # ROCM EP fallback is available, MIGraphX is not registered for clap at
+    # all - it would never compile that node anyway, so there is nothing to
+    # lose - and clap gets ONLY ROCM(+CPU) in its own session, never sharing
+    # one with MIGraphX. musicnn is unaffected either way: nothing ever pairs
+    # ROCM into its session.
+    rocm_available = _rocm_ep_available()
+    migraphx_labels = ["musicnn"] if rocm_available else ["musicnn", "clap"]
+
     # needs_static_shapes tells core to pin the CLAP audio model's symbolic time
     # axis before it builds the session; MIGraphX cannot compile a dynamic dim.
     # Core does not know this provider's name, so without the flag CLAP would be
@@ -213,7 +239,7 @@ def register(ctx):
         ctx.register_onnx_provider(
             "MIGraphXExecutionProvider",
             options,
-            only_models=["musicnn", "clap"],
+            only_models=migraphx_labels,
             needs_static_shapes=True,
         )
     else:
@@ -225,7 +251,7 @@ def register(ctx):
         # resolve_providers() in core only matches the entry whose only_models
         # names the session's label, so registering the same provider name
         # twice like this is safe - each session only ever sees one of them.
-        for label in ("musicnn", "clap"):
+        for label in migraphx_labels:
             model_options = dict(options)
             model_options.update(_compiled_model_options(label, fp16))
             ctx.register_onnx_provider(
@@ -241,26 +267,17 @@ def register(ctx):
             _gpu_arch(),
         )
     logger.info(
-        "Registered MIGraphX ONNX provider for musicnn and CLAP audio (AMD GPU, fp16=%s)",
+        "Registered MIGraphX ONNX provider for %s (AMD GPU, fp16=%s)",
+        " and ".join(migraphx_labels),
         options.get("migraphx_fp16_enable", "0"),
     )
 
-    # CLAP audio's Resize node exports an explicit keep_aspect_ratio_policy
-    # attribute (opset-19 exporter behavior). gfx803's MIGraphX is pinned to
-    # release/rocm-rel-6.4 (see MIGRAPHX_REF in rocm-migraphx-ort-builder's
-    # gfx803/Dockerfile.gfx803), whose ONNX parser throws on that attribute's
-    # mere presence regardless of value or static/dynamic shape
-    # (parse_resize.cpp: "keep_aspect_ratio_policy is not supported!") - so
-    # CLAP can never compile there; only musicnn benefits from the entry
-    # above. This is fixed upstream on MIGraphX's develop branch (stretch/
-    # absent now accepted), which is what the ROCm 7 base for gfx9xx/gfx1030+
-    # builds against - CLAP compiles fine there, e.g. RX 9070 XT/gfx1201.
-    # Where the plain kernel-based ROCMExecutionProvider is available (gfx803's
-    # ORT build only - see _rocm_ep_available), register it as a CLAP-only
-    # fallback: it runs Resize as an ordinary op instead of parsing the graph
-    # ahead of time, so the attribute is a non-issue. No fp16/static-shape
+    # CLAP-only fallback: plain kernel-based ROCMExecutionProvider, its own
+    # session (never MIGraphX+ROCM together - see above). Runs Resize as an
+    # ordinary op instead of parsing the graph ahead of time, so the
+    # keep_aspect_ratio_policy attribute is a non-issue. No fp16/static-shape
     # options needed - it handles dynamic dims natively.
-    if _rocm_ep_available():
+    if rocm_available:
         ctx.register_onnx_provider(
             "ROCMExecutionProvider",
             {"device_id": 0},

@@ -113,13 +113,48 @@ message), which is why this has not been seen on RX 9070 XT (gfx1201) or other
 newer-base arches - CLAP compiles fine there.
 
 Where the plain kernel-based `ROCMExecutionProvider` is available (gfx803's
-ORT build, 1.21.1, still ships it alongside MIGraphX as a fallback for graphs
-MIGraphX can't compile there - the ROCm 7 base used for gfx9xx/gfx1030+ dropped
-it, keeping only MIGraphX), the plugin registers it as a CLAP-only fallback
-after the MIGraphX entry: it runs Resize as an ordinary op rather than parsing
-the graph ahead of time, so the attribute is a non-issue, and no static-shape
-pinning or fp16 flags are needed. `_rocm_ep_available()` naturally scopes this
-to gfx803 today without hardcoding the arch.
+ORT build, 1.21.1, still ships it - the ROCm 7 base used for gfx9xx/gfx1030+
+dropped it, keeping only MIGraphX), the plugin registers it as CLAP's *only*
+GPU provider on that arch: it runs Resize as an ordinary op rather than
+parsing the graph ahead of time, so the attribute is a non-issue, and no
+static-shape pinning or fp16 flags are needed. `_rocm_ep_available()`
+naturally scopes this to gfx803 today without hardcoding the arch.
+
+**MIGraphX is deliberately NOT registered for `clap` on these arches at all**
+- not even alongside ROCM as a first attempt. Putting both providers in one
+ORT session for CLAP was tried and confirmed unsafe on real gfx803 hardware:
+MIGraphX does real GPU work on the parts of the graph it can compile before
+reaching the unsupported Resize node, and handing that node off to
+`ROCMExecutionProvider` within the same session SIGSEGVs the whole worker
+process (exit 139) - not a catchable ONNX Runtime exception like a MIGraphX-
+only session raises. Confirmed with a minimal repro
+(`local-test/repro_clap_provider_chain.py`, plus the more general
+`local-test/repro_migraphx_then_rocm_crash.py` showing the same fault from
+any MIGraphX-session-then-ROCM-session sequence in one process).
+
+Independent prior art for this combination being broken (found after the fact,
+not the basis for the fix - the hardware repro above already was):
+[microsoft/onnxruntime#14679](https://github.com/microsoft/onnxruntime/issues/14679)
+reports `MIGraphXExecutionProvider` + `ROCMExecutionProvider` together in one
+session (with CPU fallback) producing wrong/corrupted output vs. either
+provider alone - still open/unresolved upstream as of this writing. Separately,
+[immich-app/immich#27387](https://github.com/immich-app/immich/issues/27387)
+(fixed by [#28444](https://github.com/immich-app/immich/pull/28444)) documents
+a MIGraphX-*alone* SIGSEGV caused by concurrent/overlapping compile calls in one
+process, fixed by serializing compiles with a lock - different mechanism, but
+corroborates that MIGraphX's in-process state is fragile under multi-session
+use in general. Neither report reproduces our exact `hip_global.cpp: Module not
+initialized` message or is gfx803-specific - that mechanistic detail (HIP
+module-table corruption on EP hand-off) is our own inference from the repro,
+not independently documented anywhere found. The practical conclusion (never
+share a session between these two providers) holds regardless of which exact
+internal mechanism is at fault.
+
+Since MIGraphX could never compile CLAP's Resize node here anyway, there's nothing
+lost by skipping it - `clap`'s session on gfx803 is `[ROCMExecutionProvider,
+CPUExecutionProvider]` only. musicnn is unaffected: its session never
+contains ROCM, so it keeps `[MIGraphXExecutionProvider, CPUExecutionProvider]`
+as before.
 
 ## Env (set by the ROCm image, override if needed)
 
