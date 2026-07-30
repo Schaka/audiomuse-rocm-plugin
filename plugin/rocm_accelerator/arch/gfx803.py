@@ -11,12 +11,19 @@
 Full findings behind each one: ``docs/ARCH_NOTES.md``.
 """
 
+from types import MappingProxyType
+
 from ..providers import ROCM
 from .base import ArchProfile, ProviderSpec
 
 
 class Gfx803Profile(ArchProfile):
     arches = frozenset({"gfx803", "gfx802", "gfx805"})
+
+    # arlo-phoenix/CTranslate2-rocm's "rocm" branch (what this arch builds
+    # against) carries the same CT2_CUDA_ALLOCATOR/cub_caching support as
+    # upstream - same env var, same fix class as gfx1201's.
+    env = MappingProxyType({"CT2_CUDA_ALLOCATOR": "cub_caching"})
 
     # GCN 4 has no packed FP16: fp16 math runs at a fraction of the fp32 rate,
     # so enabling it costs precision for no speedup.

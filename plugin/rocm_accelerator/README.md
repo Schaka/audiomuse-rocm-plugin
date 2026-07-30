@@ -30,7 +30,16 @@ and the how-to in
 
 ## Settings
 
-Edit from the Settings button on the admin Plugins page.
+Edit from the Settings button on the admin Plugins page. That button opens a
+raw JSON editor for the whole settings object, not a form with one field per
+setting - type the keys below directly as JSON, e.g.:
+
+```json
+{
+  "asr_backend": "whisper_cpp",
+  "asr_backend_variant": "vulkan"
+}
+```
 
 | Setting | Default | Effect |
 | --- | --- | --- |

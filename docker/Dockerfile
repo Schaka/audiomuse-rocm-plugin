@@ -188,14 +188,19 @@ RUN set -eux; \
         libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers glslc spirv-headers; \
     rm -rf /var/lib/apt/lists/*
 
+# BUILD_SHARED_LIBS=OFF: statically links ggml/whisper/parakeet into the CLI
+# binary itself, so only that one file needs copying into the runner stage -
+# no libggml*.so/libwhisper.so siblings, no RPATH-into-a-build-tree-that-
+# won't-exist-there problem. System libs (libvulkan.so.1, libstdc++, ...)
+# stay dynamic - those are already in the runner image regardless.
 FROM ggml-vulkan-deps AS whisper-cpp-vulkan
 RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build
-RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
     && cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
 FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
 RUN git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build
-RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release \
+RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
     && cmake --build /build/build -j"$(nproc)" --target parakeet-cli
 
 FROM ${BASE_IMAGE} AS whisper-cpp-hip
@@ -212,7 +217,7 @@ RUN set -eux; \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
     rm -rf /var/lib/apt/lists/*; \
     git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build; \
-    cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release \
+    cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
         -DGGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
     cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
@@ -233,7 +238,7 @@ RUN set -eux; \
             (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
             rm -rf /var/lib/apt/lists/*; \
             git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build; \
-            cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release \
+            cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
                 -DPARAKEET_GGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
             cmake --build /build/build -j"$(nproc)" --target parakeet-cli; \
             ;; \
@@ -376,6 +381,9 @@ PY
 # the plugin's asr_backend/asr_backend_variant settings (see
 # plugin/rocm_accelerator/whisper_cpp_backend.py and parakeet_cpp_backend.py).
 # Both variants of an engine share one model file - only the binary differs.
+#
+# Both engines build statically (BUILD_SHARED_LIBS=OFF above), so each is one
+# self-contained binary - no siblings to bring along, no RPATH concerns.
 COPY --from=whisper-cpp-vulkan /build/build/bin/whisper-cli /opt/asr-backends/whisper-cpp/whisper-cli-vulkan
 COPY --from=whisper-cpp-hip /build/build/bin/whisper-cli /opt/asr-backends/whisper-cpp/whisper-cli-hip
 COPY --from=parakeet-cpp-vulkan /build/build/examples/cli/parakeet-cli /opt/asr-backends/parakeet-cpp/parakeet-cli-vulkan

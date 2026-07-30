@@ -169,17 +169,20 @@ def register(ctx):
         )
 
     asr_backend, asr_variant = _resolve_asr_backend(profile)
+    # faster_whisper has no Vulkan/HIP build variant - it's always CTranslate2's
+    # own HIP path - so the variant is meaningless noise in that backend's log line.
+    asr_variant_label = asr_variant if asr_backend != "faster_whisper" else "n/a"
     if _asr_available(asr_backend, asr_variant):
         ctx.register_analysis_provider(
             "asr", lambda: _asr_factory_for(asr_backend, asr_variant)
         )
         logger.info(
             "Registered %s (variant=%s) as the ASR backend (AMD GPU)",
-            asr_backend, asr_variant,
+            asr_backend, asr_variant_label,
         )
     else:
         logger.warning(
             "%s (variant=%s) unavailable on this image - lyrics ASR stays on the "
             "ONNX backend (CPU). musicnn acceleration is unaffected.",
-            asr_backend, asr_variant,
+            asr_backend, asr_variant_label,
         )

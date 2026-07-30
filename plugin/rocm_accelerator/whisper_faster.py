@@ -46,21 +46,15 @@ def _beam_size() -> int:
         return 5
 
 
-def _default_compute_type() -> str:
-    # gfx803/802/805 (Polaris) have no packed FP16 throughput - same finding
-    # already applied to MIGraphX (see arch.gfx803.Gfx803Profile.fp16_supported).
-    # CTranslate2's fp16 GEMM path on that arch doesn't just run slow, it trips
-    # a spurious "out of memory" from the HIP allocator instead of decoding, so
-    # this can't be left defaulted to float16 there like every other arch.
-    from . import arch, gpu
-
-    profile = arch.profile_for(gpu.detect_arch())
-    return "float16" if profile.fp16_supported else "int8_float32"
-
-
 # CTranslate2 mirrors the CUDA API on ROCm, so device="cuda" targets an AMD GPU.
 _DEVICE = os.environ.get("LYRICS_WHISPER_FASTER_DEVICE", "cuda").strip() or "cuda"
-_COMPUTE_TYPE = os.environ.get("LYRICS_WHISPER_FASTER_COMPUTE_TYPE", "").strip() or _default_compute_type()
+# Every CTranslate2 compute type is broken on gfx803 (see docs/ASR_BACKENDS.md) -
+# float16/float32/int8 crash or OOM, int8_float32 returns empty/garbage text
+# with no crash at all. Picking a "least broken" default among all-broken
+# options isn't worth maintaining now that whisper.cpp/parakeet.cpp on Vulkan
+# are the actually-working GPU backends for that arch; float16 stays the plain
+# default everywhere, same as CTranslate2's own default would be.
+_COMPUTE_TYPE = os.environ.get("LYRICS_WHISPER_FASTER_COMPUTE_TYPE", "").strip() or "float16"
 _MODEL_DIR = os.environ.get(
     "LYRICS_WHISPER_FASTER_MODEL_DIR", "/app/model/faster-whisper-small"
 ).strip()
