@@ -26,6 +26,14 @@ ARG CT2_VARIANT=prebuilt
 ARG ROCM_ARCH=gfx1201
 ARG CT2_VERSION=4.8.1
 
+# whisper.cpp/parakeet.cpp: pinned to a tagged release, not HEAD - both
+# projects churn multiple times a day (ggml is shared upstream and gets synced
+# from llama.cpp constantly), so an unpinned `git clone --depth 1` is not
+# reproducible: the exact same Dockerfile can pass or fail a build hours apart
+# with zero changes on our side. Bump these deliberately, not by drift.
+ARG WHISPER_CPP_REF=v1.9.1
+ARG PARAKEET_CPP_REF=v0.4.0
+
 # ============================================================================
 # Stage 1: core - the published AudioMuse-AI image (app code + models + HF cache)
 # ============================================================================
@@ -194,17 +202,20 @@ RUN set -eux; \
 # won't-exist-there problem. System libs (libvulkan.so.1, libstdc++, ...)
 # stay dynamic - those are already in the runner image regardless.
 FROM ggml-vulkan-deps AS whisper-cpp-vulkan
-RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build
+ARG WHISPER_CPP_REF
+RUN git clone --depth 1 --branch "${WHISPER_CPP_REF}" https://github.com/ggml-org/whisper.cpp /build
 RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     && cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
 FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
-RUN git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build
+ARG PARAKEET_CPP_REF
+RUN git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build
 RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     && cmake --build /build/build -j"$(nproc)" --target parakeet-cli
 
 FROM ${BASE_IMAGE} AS whisper-cpp-hip
 ARG ROCM_ARCH
+ARG WHISPER_CPP_REF
 SHELL ["/bin/bash", "-c"]
 # hipblas-dev/rocblas-dev: needed by name on gfx803's ROCm 6.4 base; gfx900+'s
 # ROCm 7.14 base already carries its own BLAS dev headers under a different
@@ -216,13 +227,14 @@ RUN set -eux; \
         git cmake build-essential ca-certificates; \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
     rm -rf /var/lib/apt/lists/*; \
-    git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build; \
+    git clone --depth 1 --branch "${WHISPER_CPP_REF}" https://github.com/ggml-org/whisper.cpp /build; \
     cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DGGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
     cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
 FROM ${BASE_IMAGE} AS parakeet-cpp-hip
 ARG ROCM_ARCH
+ARG PARAKEET_CPP_REF
 SHELL ["/bin/bash", "-c"]
 RUN set -eux; \
     case "${ROCM_ARCH}" in \
@@ -237,7 +249,7 @@ RUN set -eux; \
                 git cmake build-essential ca-certificates; \
             (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
             rm -rf /var/lib/apt/lists/*; \
-            git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build; \
+            git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build; \
             cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DPARAKEET_GGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
             cmake --build /build/build -j"$(nproc)" --target parakeet-cli; \
