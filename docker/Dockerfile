@@ -195,12 +195,12 @@ RUN set -eux; \
 # stay dynamic - those are already in the runner image regardless.
 FROM ggml-vulkan-deps AS whisper-cpp-vulkan
 RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build
-RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     && cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
 FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
 RUN git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build
-RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     && cmake --build /build/build -j"$(nproc)" --target parakeet-cli
 
 FROM ${BASE_IMAGE} AS whisper-cpp-hip
@@ -217,7 +217,7 @@ RUN set -eux; \
     (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
     rm -rf /var/lib/apt/lists/*; \
     git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build; \
-    cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+    cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DGGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
     cmake --build /build/build -j"$(nproc)" --target whisper-cli
 
@@ -238,7 +238,7 @@ RUN set -eux; \
             (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
             rm -rf /var/lib/apt/lists/*; \
             git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build; \
-            cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DPARAKEET_GGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
             cmake --build /build/build -j"$(nproc)" --target parakeet-cli; \
             ;; \
