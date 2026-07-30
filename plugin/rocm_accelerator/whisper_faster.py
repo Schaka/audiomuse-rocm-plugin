@@ -46,9 +46,21 @@ def _beam_size() -> int:
         return 5
 
 
+def _default_compute_type() -> str:
+    # gfx803/802/805 (Polaris) have no packed FP16 throughput - same finding
+    # already applied to MIGraphX (see arch.gfx803.Gfx803Profile.fp16_supported).
+    # CTranslate2's fp16 GEMM path on that arch doesn't just run slow, it trips
+    # a spurious "out of memory" from the HIP allocator instead of decoding, so
+    # this can't be left defaulted to float16 there like every other arch.
+    from . import arch, gpu
+
+    profile = arch.profile_for(gpu.detect_arch())
+    return "float16" if profile.fp16_supported else "int8_float32"
+
+
 # CTranslate2 mirrors the CUDA API on ROCm, so device="cuda" targets an AMD GPU.
 _DEVICE = os.environ.get("LYRICS_WHISPER_FASTER_DEVICE", "cuda").strip() or "cuda"
-_COMPUTE_TYPE = os.environ.get("LYRICS_WHISPER_FASTER_COMPUTE_TYPE", "float16").strip() or "float16"
+_COMPUTE_TYPE = os.environ.get("LYRICS_WHISPER_FASTER_COMPUTE_TYPE", "").strip() or _default_compute_type()
 _MODEL_DIR = os.environ.get(
     "LYRICS_WHISPER_FASTER_MODEL_DIR", "/app/model/faster-whisper-small"
 ).strip()
@@ -149,14 +161,24 @@ def transcribe(
         return {"text": "", "language": "", "duration": duration}
 
     beam_size = _beam_size()
-    # language=None lets faster-whisper auto-detect; VAD is done upstream
-    # (silero_onnx), so leave faster-whisper's vad_filter off.
-    segments, info = model.transcribe(
-        audio,
-        language=language or None,
-        beam_size=beam_size,
-        vad_filter=False,
-    )
+    try:
+        # language=None lets faster-whisper auto-detect; VAD is done upstream
+        # (silero_onnx), so leave faster-whisper's vad_filter off. With
+        # language=None this call itself runs detect_language's encode pass
+        # eagerly (before the segments generator even exists), so a GPU
+        # failure here has to be caught same as the segment loop below - the
+        # generator's own try/except never sees it.
+        segments, info = model.transcribe(
+            audio,
+            language=language or None,
+            beam_size=beam_size,
+            vad_filter=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "faster-whisper transcribe failed (%s) - %s", exc, _vram_status()
+        )
+        return {"text": "", "language": "", "duration": duration}
 
     texts = []
     logprobs = []

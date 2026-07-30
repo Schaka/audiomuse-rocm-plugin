@@ -18,10 +18,11 @@ from typing import Dict, Optional
 
 from .base import ArchProfile, ProviderSpec
 from .gfx803 import Gfx803Profile
+from .gfx1201 import Gfx1201Profile
 
 __all__ = ["ArchProfile", "ProviderSpec", "profile_for", "apply_env"]
 
-PROFILES = (Gfx803Profile,)
+PROFILES = (Gfx803Profile, Gfx1201Profile)
 
 
 def profile_for(arch: Optional[str]) -> ArchProfile:

@@ -284,18 +284,13 @@ ENV LANG=C.UTF-8 \
 # busy-polling (the default spin-wait pegs a CPU core). MIOPEN_*: kernel
 # compile cache dir, mounted as a volume by compose to persist across restarts.
 # LYRICS_WHISPER_FASTER_*: read by the plugin's faster-whisper backend.
-# CT2_CUDA_ALLOCATOR=cub_caching: default CT2 CUDA/HIP allocator triggers a
-# GPU memory access fault (page not present) mid-transcribe on gfx1201
-# (RX 9070 XT / RDNA4), crashing the host. Reproduced locally with real audio
-# and confirmed fixed by this allocator. Root cause is an upstream ROCm LLVM
-# codegen bug for gfx1201, not CTranslate2 itself; see
-# https://github.com/OpenNMT/CTranslate2/issues/2021
+# CT2_CUDA_ALLOCATOR is deliberately NOT set here: it's arch-specific (see
+# plugin/rocm_accelerator/arch/gfx1201.py), so every other arch gets to keep
+# CTranslate2's own default allocator instead of being pinned to one arch's fix.
 ENV HSA_ENABLE_INTERRUPT=1 \
-    CT2_CUDA_ALLOCATOR=cub_caching \
     MIOPEN_USER_DB_PATH=/app/.cache/miopen \
     MIOPEN_CUSTOM_CACHE_DIR=/app/.cache/miopen \
     LYRICS_WHISPER_FASTER_DEVICE=cuda \
-    LYRICS_WHISPER_FASTER_COMPUTE_TYPE=float16 \
     LYRICS_WHISPER_FASTER_MODEL_DIR=/app/model/faster-whisper-small
 RUN mkdir -p /app/.cache/miopen /app/.cache/migraphx && chmod 777 /app/.cache/miopen /app/.cache/migraphx
 

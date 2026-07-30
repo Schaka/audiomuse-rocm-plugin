@@ -92,6 +92,17 @@ MIGraphX is also simply faster for musicnn here (~22ms vs ~26–30ms mean per
 inference, when the ROCM EP does not crash). Full write-up in the
 [base image repo](https://github.com/Schaka/rocm-migraphx-ort-builder/blob/main/gfx803/README.md#known-runtime-issue-rocmexecutionprovider-crashes-on-fused-conv-musicnn-class-models).
 
+### faster-whisper must not default to `float16` either
+
+The `fp16_supported = False` finding above was applied to MIGraphX only; CTranslate2
+(faster-whisper's backend) kept defaulting to `compute_type="float16"` regardless of
+arch. On gfx803 that doesn't just run slow like the MIGraphX case — the fp16 GEMM
+path fails outright, and CTranslate2's HIP allocator reports it as a plain
+`RuntimeError: CUDA failed with error out of memory` (mid-transcribe, after a
+successful GPU model *load*), indistinguishable from a genuinely full card.
+`whisper_faster._default_compute_type()` now reuses `arch.profile_for(...).fp16_supported`
+so gfx803 gets `int8_float32` unless `LYRICS_WHISPER_FASTER_COMPUTE_TYPE` overrides it.
+
 ## gfx1201 (RDNA4: RX 9070 / XT)
 
 - **GPU page faults in MIGraphX-compiled kernels** (`mul_add_kernel` /
