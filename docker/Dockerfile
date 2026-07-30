@@ -222,7 +222,7 @@ RUN set -ux; \
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 WORKDIR /app
-COPY requirements/rocm.txt /app/requirements/rocm.txt
+COPY docker/requirements/rocm.txt /app/requirements/rocm.txt
 # common.txt is taken from the core image rather than vendored here so the app
 # deps can never drift from the core release this image is built against. It
 # has to be installed, not inherited: core installs with `uv pip install

@@ -23,7 +23,7 @@ build_only=0
 [ "${1:-}" = "--build-only" ] && build_only=1
 
 # gfx803 is ROCm 6.x on its own base package; the compose default targets RDNA4.
-export ROCM_BASE_IMAGE="${ROCM_BASE_IMAGE:-ghcr.io/schaka/rocm-gfx803-ort-torch-builder:latest}"
+export ROCM_BASE_IMAGE="${ROCM_BASE_IMAGE:-ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx803}"
 
 # That ROCm 6 base cannot use CTranslate2's prebuilt ROCm wheel (it wants
 # libhipblas.so.3, ROCm 7), so the ROCm fork is compiled from source for

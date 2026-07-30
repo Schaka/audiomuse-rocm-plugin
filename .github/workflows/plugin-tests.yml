@@ -1,0 +1,55 @@
+name: Plugin tests
+
+# Runs on every plugin change, and is called by both publish workflows so a
+# failing suite blocks a release instead of being noticed after users install it.
+#
+# .github/scripts is in the filters because the packaging tests run those scripts
+# for real - the catalog and zip layout they produce is what core has to read.
+#
+# The path filters are duplicated across the two triggers because GitHub Actions
+# does not support YAML anchors in workflow files.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugin/**'
+      - '.github/scripts/**'
+      - '.github/workflows/plugin-tests.yml'
+  pull_request:
+    paths:
+      - 'plugin/**'
+      - '.github/scripts/**'
+      - '.github/workflows/plugin-tests.yml'
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # The Python project's root: pytest.ini and the dev requirements live
+        # there, and the suite imports the package as `plugin.rocm_accelerator`
+        # from the directory above.
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the interpreter in the ROCm worker image's venv.
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: plugin/requirements/dev.txt
+
+      - run: pip install -r requirements/dev.txt
+
+      # jq and zip drive the packaging tests, which skip themselves when either
+      # is missing - assert instead of installing, so a runner image change turns
+      # into a failure rather than a silently shrinking suite.
+      - run: |
+          command -v jq
+          command -v zip
+
+      - run: pytest -q

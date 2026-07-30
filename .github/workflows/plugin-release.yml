@@ -34,7 +34,13 @@ permissions:
   contents: write
 
 jobs:
+  # A published version is immutable, so the suite has to pass before the
+  # release exists - there is no fixing it afterwards, only superseding it.
+  tests:
+    uses: ./.github/workflows/plugin-tests.yml
+
   release:
+    needs: tests
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

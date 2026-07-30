@@ -11,9 +11,10 @@
 # Usage (from this repo's root):
 #   docker compose -f local-test/docker-compose-rocm.yaml up --build
 #
-# To test a different arch (e.g. gfx803), override the base image:
-#   ROCM_BASE_IMAGE=ghcr.io/schaka/rocm-gfx803-ort-torch-builder:latest \
+# To test a different arch, override the base image:
+#   ROCM_BASE_IMAGE=ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx1030 \
 #     docker compose -f local-test/docker-compose-rocm.yaml up --build
+# gfx803 also needs CT2_VARIANT/CT2_REPO/ROCM_ARCH; build-gfx803.sh sets them.
 #
 # Then, in the web UI (http://localhost:8000):
 #   1. Log in as admin, open Plugins > Repositories.

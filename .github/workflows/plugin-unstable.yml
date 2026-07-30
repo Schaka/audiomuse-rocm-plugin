@@ -36,7 +36,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # An unstable build is still an installable one, so it does not go out on a
+  # red suite.
+  tests:
+    uses: ./.github/workflows/plugin-tests.yml
+
   unstable:
+    needs: tests
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

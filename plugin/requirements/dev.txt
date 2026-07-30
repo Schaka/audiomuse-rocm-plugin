@@ -1,0 +1,6 @@
+# Test-only dependencies. The plugin itself declares none: everything it uses at
+# runtime comes from the ROCm worker image (see rocm_accelerator/README.md).
+pytest==8.4.2
+# Imported by the ASR backend, so the tests need it too. Not pinned to the
+# image's version: nothing here depends on numpy behaviour that differs.
+numpy

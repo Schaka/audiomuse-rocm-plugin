@@ -6,24 +6,20 @@
 # the terms of the GNU Affero General Public License v3.0. See the LICENSE file
 # in the project root or <https://github.com/NeptuneHub/AudioMuse-AI/blob/main/LICENSE>
 
-"""faster-whisper (CTranslate2) ASR backend, shipped by the ROCm Accelerator plugin.
+"""faster-whisper (CTranslate2) ASR backend for the lyrics pipeline.
 
-Drop-in replacement for core's whisper_onnx, registered via
-``ctx.register_analysis_provider('asr', ...)``. Used on the AMD/ROCm image because
-MIGraphX can't parse the ONNX Whisper decoder's dynamic If/KV-cache subgraphs;
-CTranslate2 has a native ROCm HIP backend instead. Mirrors whisper_onnx's public
-surface: load_whisper_model / transcribe / is_loaded / unload.
-
-The faster-whisper and CTranslate2-ROCm libraries and the model come from the ROCm
-worker image, not from the plugin's pip requirements (a PyPI onnxruntime would
-clobber the image's MIGraphX build).
+Registered as core's ``asr`` analysis provider and so bound to that contract:
+``load_whisper_model`` / ``transcribe`` / ``is_loaded`` / ``unload``, with
+``transcribe`` returning ``text``, ``language``, ``duration`` and - only when a
+confidence is actually known - ``avg_logprob``.
 
 Main Features:
-* Lazy, thread-safe model load with a CPU/int8 fallback when the GPU load fails,
-  kept as a module singleton so core resolves the backend once per worker.
-* transcribe returns core's dict contract (text/language/duration/avg_logprob),
-  degrading to empty text instead of failing the run when the model is missing.
-* is_loaded / unload mirror whisper_onnx so the per-album memory release works.
+* Lazy, thread-safe model load with a CPU fallback when the GPU load fails,
+  kept as a module singleton so one model serves a whole album.
+* transcribe degrades to empty text rather than failing a run.
+
+The libraries and the model come from the ROCm worker image; this module only
+uses them.
 """
 
 from __future__ import annotations
@@ -63,11 +59,9 @@ _load_lock = threading.Lock()
 
 
 def _vram_status() -> str:
-    # torch is baked into the ROCm base image (same one the plugin's __init__
-    # uses for arch detection), so this is available whenever CTranslate2 is.
-    # mem_get_info reports what HIP itself thinks is free, independent of
-    # whatever CTranslate2's own allocator is doing - the number that tells
-    # us whether a GPU OOM here is real or a driver/allocator false report.
+    # Asks HIP what it thinks is free, independent of CTranslate2's own
+    # allocator - the number that tells a real OOM apart from an allocator
+    # reporting one on a card with VRAM to spare.
     try:
         import torch
 
@@ -102,15 +96,9 @@ def load_whisper_model():
         except Exception as exc:
             # Fall back to CPU rather than failing the whole lyrics run. int8 is
             # tried first for speed, but CTranslate2 only has an int8 CPU kernel
-            # when it was built against oneDNN/MKL - the source builds (gfx803,
-            # gfx9xx) are OpenBLAS-only and raise here, so float32 backs it up.
-            #
-            # A GPU load failing with "out of memory" on a card with plenty of
-            # free VRAM points at a CTranslate2-rocm/HIP allocator bug rather
-            # than real contention (see OpenNMT/CTranslate2#2021 for the same
-            # symptom on gfx1201) - log actual free/total VRAM here so that's
-            # distinguishable from a genuinely full card without needing to
-            # reproduce on the hardware.
+            # when built against oneDNN/MKL, so float32 has to back it up.
+            # VRAM is logged because a spurious "out of memory" from the HIP
+            # allocator is otherwise indistinguishable from a genuinely full card.
             logger.warning(
                 "faster-whisper GPU load failed (device=%s, compute=%s): %s - "
                 "falling back to CPU (%s)",
@@ -158,7 +146,7 @@ def transcribe(
         model = load_whisper_model()
     except WhisperLoadRefused as exc:
         logger.warning("faster-whisper load refused: %s", exc)
-        return {"text": "", "language": "", "duration": duration, "avg_logprob": float("-inf")}
+        return {"text": "", "language": "", "duration": duration}
 
     beam_size = _beam_size()
     # language=None lets faster-whisper auto-detect; VAD is done upstream
@@ -188,23 +176,25 @@ def transcribe(
             len(texts),
         )
 
-    full_text = " ".join(texts).strip()
-    detected = getattr(info, "language", "") or ""
-    avg_logprob = float(np.mean(logprobs)) if logprobs else float("-inf")
     info_dur = getattr(info, "duration", None)
-    logger.info(
-        "faster-whisper: %.1fs audio (lang=%r, beam=%d, avg_logprob=%.2f)",
-        info_dur if info_dur else duration,
-        detected,
-        beam_size,
-        avg_logprob,
-    )
-    return {
-        "text": full_text,
-        "language": detected,
+    result = {
+        "text": " ".join(texts).strip(),
+        "language": getattr(info, "language", "") or "",
         "duration": float(info_dur) if info_dur else duration,
-        "avg_logprob": avg_logprob,
     }
+    # Omitted, not faked, when no segment reported one: core skips its quality
+    # gate on a missing avg_logprob but would fail every transcript on a
+    # placeholder value.
+    if logprobs:
+        result["avg_logprob"] = float(np.mean(logprobs))
+    logger.info(
+        "faster-whisper: %.1fs audio (lang=%r, beam=%d, avg_logprob=%s)",
+        result["duration"],
+        result["language"],
+        beam_size,
+        f"{result['avg_logprob']:.2f}" if "avg_logprob" in result else "n/a",
+    )
+    return result
 
 
 def is_loaded() -> bool:

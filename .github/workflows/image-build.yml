@@ -47,7 +47,9 @@ jobs:
           - gfx1151
           - gfx1200
           - gfx1201
-          - gfx803  # Polaris, ROCm 6.x base - see rocm-migraphx-ort-builder/gfx803/README.md
+          # Polaris. Same base package as the rest, but that tag is built on
+          # ROCm 6 rather than 7 - which is what CT2_VARIANT below reacts to.
+          - gfx803
     steps:
       # The ROCm base and the core image are both large; the runner's stock
       # ~14GB of free disk is not enough to pull both and write the result.
@@ -78,14 +80,7 @@ jobs:
           arch="${{ matrix.arch }}"
           version="${{ inputs.version }}"
 
-          # gfx803 is a different ROCm major on a different base image, built by
-          # its own workflow upstream, so it has its own package with no arch
-          # suffix rather than being another tag in the main matrix.
-          if [ "$arch" = "gfx803" ]; then
-            base="${owner}/rocm-gfx803-ort-torch-builder:latest"
-          else
-            base="${owner}/rocm-migraphx-ort-torch-builder:latest-${arch}"
-          fi
+          base="${owner}/rocm-migraphx-ort-torch-builder:latest-${arch}"
           echo "base=${base}" >> "$GITHUB_OUTPUT"
 
           # CTranslate2 comes in three flavours, because upstream's prebuilt

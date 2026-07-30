@@ -8,284 +8,126 @@
 
 """ROCm Accelerator plugin for AudioMuse-AI.
 
-Wires AMD GPU acceleration into the analysis pipeline without forking core:
+Runs the analysis models AMD GPUs can handle on the GPU, using two core seams:
 
-* musicnn and the CLAP audio encoder run on the AMD GPU through ONNX Runtime's
-  MIGraphXExecutionProvider, scoped to those two models only. CLAP needs its
-  symbolic time axis pinned to a static shape before MIGraphX can compile it,
-  which core does for any provider registered with ``needs_static_shapes=True``
-  (see ``tasks/clap_analyzer.py:_prepared_model_bytes``). The Whisper decoder
-  has no such fixup, so it stays off this chain entirely.
-* lyrics ASR is swapped to faster-whisper (CTranslate2's ROCm backend) because
-  MIGraphX can't run the ONNX Whisper decoder at all.
+* ``register_onnx_provider`` for musicnn and the CLAP audio encoder, via ONNX
+  Runtime's MIGraphX provider. Scoped to those labels because the Whisper
+  decoder's graph cannot be compiled by MIGraphX at all.
+* ``register_analysis_provider('asr', ...)`` to swap lyrics ASR to
+  faster-whisper, for the same reason.
 
-The ROCm runtime (MIGraphX-enabled onnxruntime, CTranslate2 ROCm, faster-whisper,
-GPU device access) is provided by the ROCm worker image, not this plugin. On any
-other image the plugin registers nothing and stays inert.
+Anything that has to differ per GPU generation lives in ``arch/``, not here.
+The ROCm runtime itself comes from the ROCm worker image; on any other image
+this registers nothing.
 """
 
 import logging
-import os
-import subprocess
 
 from plugin.api import get_setting
 
+from . import arch, cache, gpu
+from .providers import MIGRAPHX
+
 logger = logging.getLogger("plugin.rocm_accelerator")
-
-MIGRAPHX_CACHE_ROOT = "/app/.cache/migraphx"
-
-# GCN 4 (Polaris - gfx803/802/805, e.g. RX 470/480/570/580) has no packed FP16
-# throughput: FP16 math runs at a fraction of FP32 rate (or is emulated), so
-# migraphx_fp16_enable buys no speedup and only adds precision risk. Packed
-# FP16 starts at Vega (gfx900) and is present on every RDNA/CDNA part since.
-NO_PACKED_FP16_ARCHES = {"gfx803", "gfx802", "gfx805"}
-
-
-def _gpu_arch():
-    # Deliberately shells out to rocminfo instead of asking torch.cuda: this
-    # runs from register(), which fires once in the persistent RQ worker
-    # process at startup - well before RQ fork()s a fresh child ("horse", per
-    # RQ's own log lines) to actually run each job. A HIP/CUDA context does
-    # not survive fork() cleanly; touching torch.cuda here would initialize
-    # one in the long-lived parent, and every forked child then inherits a
-    # driver handle that looks initialized but isn't, so the child's first
-    # real GPU call (MIGraphX's hipMemGetInfo) fails with a generic-looking
-    # "invalid argument" - exactly the failure this was chasing, and the
-    # same root cause behind the "Cannot re-initialize CUDA in forked
-    # subprocess" warning core already logs elsewhere. rocminfo is a separate
-    # process with its own address space, so parsing its text output detects
-    # the arch without initializing anything in this one.
-    try:
-        out = subprocess.run(
-            ["rocminfo"], capture_output=True, text=True, timeout=10, check=True
-        ).stdout
-    except Exception:
-        return None
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("Name:"):
-            name = line.split(":", 1)[1].strip()
-            if name.startswith("gfx"):
-                return name
-    return None
-
-
-def _fp16_capable():
-    arch = _gpu_arch()
-    if arch is None:
-        # Unknown - don't block a setting we can't verify; the arch's own EP
-        # session creation is the backstop if fp16 truly isn't supported.
-        return True
-    return arch not in NO_PACKED_FP16_ARCHES
-
-
-# gfx803's base is ROCm 6.4.4 (see image-build.yml / docker/Dockerfile's ct2
-# stage comments - gfx803 is the one arch still on a ROCm 6 base). Its
-# onnxruntime (1.21.1) MIGraphX EP build predates the migraphx_model_cache_dir
-# option: passing it fails session creation with "Invalid MIGraphX EP option:
-# migraphx_model_cache_dir" and ORT silently falls back to CPUExecutionProvider.
-# Confirmed by `strings` on the shipped onnxruntime .so - it has no
-# migraphx_model_cache_dir symbol, but does have the older, pre-cache-dir
-# option set: migraphx_save_compiled_model / migraphx_save_model_path (and the
-# load_ counterparts) - note the path keys do NOT repeat "compiled": it's
-# migraphx_save_model_path, not migraphx_save_compiled_model_path (the latter
-# is rejected as an invalid option and silently drops the whole EP to CPU).
-# Those options still work, they just take one fixed file per session instead
-# of auto-keying a whole directory, hence _compiled_model_options() below doing
-# by hand what migraphx_model_cache_dir would otherwise do for it. Every other
-# arch here is on the ROCm 7 base, which has migraphx_model_cache_dir.
-NO_MODEL_CACHE_DIR_ARCHES = {"gfx803"}
-
-
-def _model_cache_dir_supported():
-    arch = _gpu_arch()
-    if arch is None:
-        return True
-    return arch not in NO_MODEL_CACHE_DIR_ARCHES
 
 
 def _asr_factory():
-    # Imported lazily on the worker so non-ROCm containers never touch it.
+    # Imported lazily so non-ROCm images never load a faster-whisper backend
+    # they have no libraries for.
     from . import whisper_faster
 
     return whisper_faster
 
 
-def _migraphx_available():
-    try:
-        import onnxruntime as ort
-
-        return "MIGraphXExecutionProvider" in ort.get_available_providers()
-    except Exception:
+def _resolve_fp16(profile, arch_name):
+    fp16 = bool(get_setting("fp16_enable", True))
+    if fp16 and not profile.fp16_supported:
+        logger.warning(
+            "GPU arch %s gains nothing from fp16 - ignoring fp16_enable and "
+            "running MIGraphX in fp32.", arch_name,
+        )
         return False
+    return fp16
 
 
-def _rocm_ep_available():
-    # Only gfx803's ORT build (1.21.1) still carries the plain kernel-based
-    # ROCMExecutionProvider alongside MIGraphX (see rocm-migraphx-ort-builder's
-    # gfx803/Dockerfile.gfx803: --use_rocm is passed there as a fallback for
-    # graphs MIGraphX can't compile - gfx803 has no CK/MLIR to fuse with). Later
-    # ORT builds (the ROCm 7 base used for gfx9xx/gfx1030+) dropped it, so this
-    # check alone scopes the fallback below to where it actually exists.
-    try:
-        import onnxruntime as ort
+def _register_migraphx(ctx, profile, labels, fp16):
+    options = {"device_id": 0}
+    if fp16:
+        options["migraphx_fp16_enable"] = "True"
+    options.update(profile.migraphx_options())
 
-        return "ROCMExecutionProvider" in ort.get_available_providers()
-    except Exception:
-        return False
+    if profile.supports_model_cache_dir:
+        options.update(cache.cache_dir_options(fp16))
+        # needs_static_shapes makes core pin CLAP's symbolic time axis before
+        # building the session; MIGraphX cannot compile a dynamic dim.
+        ctx.register_onnx_provider(
+            MIGRAPHX, options, only_models=list(labels), needs_static_shapes=True,
+        )
+        return
 
-
-def _faster_whisper_available():
-    try:
-        import faster_whisper  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
-def _cache_dir(fp16):
-    # MIGraphX keys its .mxr artifacts on MIGraphX version, graph id, GPU arch and
-    # input shapes - not on precision. An fp32 artifact would therefore be loaded
-    # as a hit after switching fp16 on, silently running the wrong precision. One
-    # subdir per precision keeps both sets valid instead of wiping on every flip.
-    cache_dir = os.path.join(MIGRAPHX_CACHE_ROOT, "fp16" if fp16 else "fp32")
-    # save_compiled_model() in the MIGraphX EP has no error handling, so a missing
-    # directory raises out of session creation rather than just skipping the save.
-    os.makedirs(cache_dir, exist_ok=True)
-    return cache_dir
-
-
-def _compiled_model_options(model_label, fp16):
-    # gfx803 fallback for _model_cache_dir(): migraphx_save/load_compiled_model
-    # each take one literal file, not a directory MIGraphX can key by graph id
-    # itself - so this does that keying by hand, one file per (model, precision).
-    # Existence of the file is the only signal available: first run for a given
-    # model/precision writes it (save), every run after reads it back (load).
-    # There's no hash-of-the-graph check like migraphx_model_cache_dir does, so
-    # a stale file from a since-changed model/shape would load wrong - delete
-    # the file (or the whole fp16/fp32 subdir) to force a recompile.
-    path = os.path.join(_cache_dir(fp16), f"{model_label}.mxr")
-    if os.path.exists(path):
-        return {
-            "migraphx_load_compiled_model": "True",
-            "migraphx_load_model_path": path,
-        }
-    return {
-        "migraphx_save_compiled_model": "True",
-        "migraphx_save_model_path": path,
-    }
+    # One registration per label, because the cache options are per-file and
+    # core keeps one options dict per registration: sharing a dict would point
+    # every model at the same compiled-model file. Core matches a session only
+    # against the registration naming its label, so the repeated provider name
+    # never puts two of these in one chain.
+    for label in labels:
+        model_options = dict(options)
+        model_options.update(cache.per_model_options(label, fp16))
+        ctx.register_onnx_provider(
+            MIGRAPHX, model_options, only_models=[label], needs_static_shapes=True,
+        )
+    logger.info(
+        "MIGraphX compiled-model cache: one file per model under %s "
+        "(delete it to force a recompile)", cache.CACHE_ROOT,
+    )
 
 
 def register(ctx):
-    # Guard: this plugin only does anything on the ROCm worker image. On the CPU
-    # or CUDA image the runtime is absent, so register nothing and leave analysis
-    # exactly as it was rather than offering a provider that can't load.
-    if not _migraphx_available():
+    providers = gpu.available_providers()
+    if MIGRAPHX not in providers:
         logger.warning(
             "MIGraphXExecutionProvider not available - ROCm Accelerator stays inert. "
             "Install this plugin on the AudioMuse-AI ROCm worker image."
         )
         return
 
-    # fp16 defaults on. A GPU page fault (mul_add_kernel / convert_mul_add_kernel)
-    # has been seen on gfx1201 (RX 9070 XT / RDNA4) during MusiCNN/CLAP inference
-    # with fp16 both on and off, so it isn't fp16-specific - disabling fp16 buys
-    # no safety, just throughput. Opt out via the plugin's settings if needed.
-    fp16 = get_setting("fp16_enable", True)
-    if fp16 and not _fp16_capable():
-        logger.warning(
-            "GPU arch %s has no packed FP16 throughput - ignoring fp16_enable "
-            "and running MIGraphX in fp32.",
-            _gpu_arch(),
-        )
-        fp16 = False
-    options = {"device_id": 0}
-    if fp16:
-        options["migraphx_fp16_enable"] = "True"
+    arch_name = gpu.detect_arch()
+    profile = arch.profile_for(arch_name)
+    logger.info("GPU arch %s -> %s", arch_name or "unknown", profile)
 
-    # CLAP audio's Resize node exports an explicit keep_aspect_ratio_policy
-    # attribute (opset-19 exporter behavior). gfx803's MIGraphX is pinned to
-    # release/rocm-rel-6.4 (see MIGRAPHX_REF in rocm-migraphx-ort-builder's
-    # gfx803/Dockerfile.gfx803), whose ONNX parser throws on that attribute's
-    # mere presence regardless of value or static/dynamic shape
-    # (parse_resize.cpp: "keep_aspect_ratio_policy is not supported!"). This
-    # is fixed upstream on MIGraphX's develop branch (stretch/absent now
-    # accepted), which is what the ROCm 7 base for gfx9xx/gfx1030+ builds
-    # against - CLAP compiles fine there, e.g. RX 9070 XT/gfx1201 - so this
-    # only matters where _rocm_ep_available() is true (gfx803 today).
-    #
-    # Putting MIGraphX and ROCMExecutionProvider in the SAME session for CLAP
-    # was tried and is unsafe: confirmed on real gfx803 hardware to SIGSEGV
-    # (exit 139) the whole worker process, not raise a catchable exception.
-    # MIGraphX does real GPU work on the rest of the graph before reaching
-    # the unsupported Resize node, and handing that node off to ROCM within
-    # the same session corrupts the HIP module table - repro'd in isolation
-    # via repro_clap_provider_chain.py in local-test/. So on arches where the
-    # ROCM EP fallback is available, MIGraphX is not registered for clap at
-    # all - it would never compile that node anyway, so there is nothing to
-    # lose - and clap gets ONLY ROCM(+CPU) in its own session, never sharing
-    # one with MIGraphX. musicnn is unaffected either way: nothing ever pairs
-    # ROCM into its session.
-    rocm_available = _rocm_ep_available()
-    migraphx_labels = ["musicnn"] if rocm_available else ["musicnn", "clap"]
+    applied_env = arch.apply_env(profile)
+    if applied_env:
+        logger.info("%s set %s", profile, applied_env)
 
-    # needs_static_shapes tells core to pin the CLAP audio model's symbolic time
-    # axis before it builds the session; MIGraphX cannot compile a dynamic dim.
-    # Core does not know this provider's name, so without the flag CLAP would be
-    # handed the dynamic graph and fail to compile.
-    if _model_cache_dir_supported():
-        options["migraphx_model_cache_dir"] = _cache_dir(fp16)
-        ctx.register_onnx_provider(
-            "MIGraphXExecutionProvider",
-            options,
-            only_models=migraphx_labels,
-            needs_static_shapes=True,
+    fp16 = _resolve_fp16(profile, arch_name or "unknown")
+
+    labels = profile.migraphx_models(providers)
+    if labels:
+        _register_migraphx(ctx, profile, labels, fp16)
+        logger.info(
+            "Registered MIGraphX ONNX provider for %s (AMD GPU, fp16=%s)",
+            ", ".join(labels), fp16,
         )
-    else:
-        # No migraphx_model_cache_dir on this EP build: fall back to explicit
-        # save/load-compiled-model file paths, which core's options dict is
-        # per-registration, not per-session - so each model needs its own
-        # registration (and its own file) rather than one shared dict, or
-        # musicnn and clap would fight over the same compiled-model file.
-        # resolve_providers() in core only matches the entry whose only_models
-        # names the session's label, so registering the same provider name
-        # twice like this is safe - each session only ever sees one of them.
-        for label in migraphx_labels:
-            model_options = dict(options)
-            model_options.update(_compiled_model_options(label, fp16))
-            ctx.register_onnx_provider(
-                "MIGraphXExecutionProvider",
-                model_options,
-                only_models=[label],
-                needs_static_shapes=True,
+
+    for spec in profile.extra_providers(providers):
+        if spec.name not in providers:
+            logger.warning(
+                "%s asked for %s, which this onnxruntime build does not have - skipping",
+                profile, spec.name,
             )
-        logger.warning(
-            "GPU arch %s's MIGraphX EP predates migraphx_model_cache_dir - "
-            "using migraphx_save/load_compiled_model per model instead "
-            "(delete /app/.cache/migraphx to force a recompile).",
-            _gpu_arch(),
-        )
-    logger.info(
-        "Registered MIGraphX ONNX provider for %s (AMD GPU, fp16=%s)",
-        " and ".join(migraphx_labels),
-        options.get("migraphx_fp16_enable", "0"),
-    )
-
-    # CLAP-only fallback: plain kernel-based ROCMExecutionProvider, its own
-    # session (never MIGraphX+ROCM together - see above). Runs Resize as an
-    # ordinary op instead of parsing the graph ahead of time, so the
-    # keep_aspect_ratio_policy attribute is a non-issue. No fp16/static-shape
-    # options needed - it handles dynamic dims natively.
-    if rocm_available:
+            continue
         ctx.register_onnx_provider(
-            "ROCMExecutionProvider",
-            {"device_id": 0},
-            only_models=["clap"],
+            spec.name,
+            dict(spec.options),
+            only_models=list(spec.only_models) or None,
+            needs_static_shapes=spec.needs_static_shapes,
         )
-        logger.info("Registered ROCMExecutionProvider fallback for CLAP audio (AMD GPU)")
+        logger.info(
+            "Registered %s for %s (AMD GPU)",
+            spec.name, ", ".join(spec.only_models) or "all models",
+        )
 
-    if _faster_whisper_available():
+    if gpu.faster_whisper_available():
         ctx.register_analysis_provider("asr", _asr_factory)
         logger.info("Registered faster-whisper as the ASR backend (AMD GPU)")
     else:

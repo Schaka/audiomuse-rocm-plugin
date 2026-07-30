@@ -1,0 +1,105 @@
+# AudioMuse-AI on an AMD GPU - complete, ready to run.
+#
+#   1. Pick your GPU's tag:  rocminfo | grep gfx     (see ../README.md)
+#      Set it below, or export ROCM_ARCH=gfx1030 before `docker compose up -d`.
+#   2. Fill in your media server under audiomuse-ai-flask.
+#   3. docker compose up -d
+#   4. http://localhost:8000 -> Plugins -> Repositories, add:
+#      https://github.com/Schaka/audiomuse-rocm-plugin/releases/latest/download/repository.json
+#      then Catalog -> install "ROCm Accelerator (AMD)" -> apply the restart.
+#
+# Flask and worker run the same image; only SERVICE_TYPE and the GPU
+# passthrough differ. The GPU is only useful on the worker - that is where
+# analysis runs.
+
+x-rocm-image: &rocm-image
+  image: ghcr.io/schaka/audiomuse-ai-rocm:latest-${ROCM_ARCH:-gfx1201}
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+  POSTGRES_DB: audiomusedb
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_URL: redis://redis:6379/0
+  TEMP_DIR: /app/temp_audio
+  TZ: ${TZ:-UTC}
+
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      <<: *db-env
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  audiomuse-ai-flask:
+    <<: *rocm-image
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *db-env
+      SERVICE_TYPE: flask
+      # --- your media server ---
+      MEDIASERVER_TYPE: jellyfin
+      JELLYFIN_URL: http://jellyfin:8096
+      JELLYFIN_USER_ID: ""
+      JELLYFIN_TOKEN: ""
+    volumes:
+      - temp-audio-flask:/app/temp_audio
+      # Installed plugin code. Both containers need it, each with its own copy.
+      - plugins-flask:/app/plugin/installed
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  audiomuse-ai-worker:
+    <<: *rocm-image
+    environment:
+      <<: *db-env
+      SERVICE_TYPE: worker
+      # The clustering library has no ROCm port, so clustering stays on CPU.
+      # ONNX analysis still uses the GPU.
+      USE_GPU_CLUSTERING: "false"
+      # Uncomment to pin to one GPU in a multi-GPU host (index or UUID):
+      # HIP_VISIBLE_DEVICES: "0"
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # The image has no `render`/`video` group, so pass the host's numeric GIDs.
+    # Yours: getent group render video
+    group_add:
+      - "${RENDER_GID:-105}"
+      - "${VIDEO_GID:-39}"
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    volumes:
+      - temp-audio-worker:/app/temp_audio
+      - plugins-worker:/app/plugin/installed
+      # GPU kernel and compiled-model caches. Without these every restart
+      # recompiles them, which costs minutes on the first analysis.
+      - miopen-cache:/app/.cache/miopen
+      - migraphx-cache:/app/.cache/migraphx
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  postgres-data:
+  temp-audio-flask:
+  temp-audio-worker:
+  plugins-flask:
+  plugins-worker:
+  miopen-cache:
+  migraphx-cache:
