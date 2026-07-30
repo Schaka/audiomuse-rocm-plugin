@@ -28,7 +28,7 @@ import logging
 
 from plugin.api import get_setting
 
-from . import arch, cache, gpu
+from . import arch, cache, gpu, ort_fusion_guard
 from .providers import MIGRAPHX
 
 logger = logging.getLogger("plugin.rocm_accelerator")
@@ -163,6 +163,8 @@ def register(ctx):
             only_models=list(spec.only_models) or None,
             needs_static_shapes=spec.needs_static_shapes,
         )
+        if spec.disable_optimizers:
+            ort_fusion_guard.install(spec.name, spec.disable_optimizers)
         logger.info(
             "Registered %s for %s (AMD GPU)",
             spec.name, ", ".join(spec.only_models) or "all models",

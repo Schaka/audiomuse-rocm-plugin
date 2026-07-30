@@ -35,16 +35,30 @@ jobs:
       matrix:
         arch:
           - gfx900
+          - gfx90c
           - gfx906
           - gfx908
           - gfx90a
           - gfx942
+          - gfx950
+          - gfx1010
+          - gfx1011
+          - gfx1012
           - gfx1030
+          - gfx1031
+          - gfx1032
+          - gfx1033
+          - gfx1034
+          - gfx1035
+          - gfx1036
           - gfx1100
           - gfx1101
           - gfx1102
+          - gfx1103
           - gfx1150
           - gfx1151
+          - gfx1152
+          - gfx1153
           - gfx1200
           - gfx1201
           # Polaris. Same base package as the rest, but that tag is built on
@@ -84,15 +98,18 @@ jobs:
           echo "base=${base}" >> "$GITHUB_OUTPUT"
 
           # CTranslate2 comes in three flavours, because upstream's prebuilt
-          # ROCm wheel is built on ROCm 7 for gfx1030 and newer only
-          # (python/tools/prepare_build_environment_linux_rocm.sh):
+          # ROCm wheel (python/tools/prepare_build_environment_linux_rocm.sh)
+          # is built for an exact, closed arch list - not "gfx1030 and newer":
+          # gfx1030,gfx1100,gfx1101,gfx1102,gfx1150,gfx1151,gfx1200,gfx1201.
           #
           #   gfx803        ROCm 6 base -> the wheel wants libhipblas.so.3 and
           #                 fails at import; build the ROCm fork.
-          #   gfx9xx        ROCm 7 base, but outside the wheel's arch list, so
-          #                 it would import cleanly and then fail at the first
-          #                 GPU transcribe; build upstream for this arch.
-          #   gfx1030+      covered by the wheel as published.
+          #   everything else outside that exact list (gfx9xx, the older
+          #                 RDNA1/gfx10.1 and gfx10.3 point releases, gfx950,
+          #                 ...) would import cleanly and then fail at the
+          #                 first GPU transcribe with no device code; build
+          #                 upstream for that arch instead.
+          #   the 8 arches above  covered by the wheel as published.
           ct2_repo="https://github.com/OpenNMT/CTranslate2.git"
           ct2_ref="v4.8.1"
           case "$arch" in
@@ -101,11 +118,11 @@ jobs:
               ct2_repo="https://github.com/arlo-phoenix/CTranslate2-rocm.git"
               ct2_ref="rocm"
               ;;
-            gfx900|gfx906|gfx908|gfx90a|gfx942)
-              ct2_variant="source"
+            gfx1030|gfx1100|gfx1101|gfx1102|gfx1150|gfx1151|gfx1200|gfx1201)
+              ct2_variant="prebuilt"
               ;;
             *)
-              ct2_variant="prebuilt"
+              ct2_variant="source"
               ;;
           esac
           echo "ct2-variant=${ct2_variant}" >> "$GITHUB_OUTPUT"

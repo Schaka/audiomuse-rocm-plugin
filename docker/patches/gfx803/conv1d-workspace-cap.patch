@@ -1,0 +1,58 @@
+CTranslate2 (arlo-phoenix/CTranslate2-rocm) gfx803: cap the MIOpen Conv1D
+workspace and survive its allocation failing.
+
+Why: miopenConvolutionForwardGetWorkSpaceSize reports the worst case across
+every solver MIOpen knows, including an im2col/GEMM fallback that asks for
+~1.44GB on Whisper's first encoder conv (batch 1, 80ch x 3000 -> 768ch, k=3).
+On gfx803 every solver the subsequent miopenFindConvolutionForwardAlgorithm
+actually considers reports "no workspace required" (verified via
+MIOPEN_LOG_LEVEL=6 on an RX 470: winograd/direct/naive all applicable with
+zero workspace, only the never-chosen GEMM fallback drives the size), so the
+huge allocation buys nothing - and when VRAM is short it fails, which
+CTranslate2 surfaces as "CUDA failed with error out of memory" and the whole
+transcription dies. That is the spurious-OOM failure mode documented in the
+plugin repo's docs/ARCH_NOTES.md ("bogus OOM").
+
+What: treat the reported size as a hint - cap it at 256MB, and if even the
+capped allocation fails fall back to running the find with no workspace at
+all, which restricts it to zero-workspace solvers instead of failing the
+transcribe.
+
+Applies to: arlo-phoenix/CTranslate2-rocm @ rocm branch (the fork is
+unmaintained, so this is carried here rather than upstreamed). Applied by
+docker/Dockerfile's ct2-source stage for ROCM_ARCH=gfx803 only.
+
+diff --git a/src/ops/conv1d_gpu.cu b/src/ops/conv1d_gpu.cu
+index e7006e4..c94e3f2 100644
+--- a/src/ops/conv1d_gpu.cu
++++ b/src/ops/conv1d_gpu.cu
+@@ -74,10 +74,27 @@ namespace ctranslate2 {
+                                                           &workspace_size));
+       if(workspace_size <= 0)
+         workspace_size = last_workspace_size;
++      // GetWorkSpaceSize reports the worst case across every solver MIOpen
++      // knows, including an im2col/GEMM fallback that asks for ~1.4GB on
++      // Whisper's first conv (1x80x3000 -> 768) - while every solver that is
++      // actually applicable on gfx803 needs no workspace at all, so the find
++      // below never uses that fallback. Treat the number as a hint rather
++      // than a requirement: cap it, and if even the capped allocation fails,
++      // run the find with no workspace, which restricts it to zero-workspace
++      // solvers instead of failing the whole transcription with a spurious
++      // "out of memory".
++      const size_t workspace_cap = 256ull * 1024 * 1024;
++      if (workspace_size > workspace_cap)
++        workspace_size = workspace_cap;
+       if (workspace_size > 0)
+       {
+-        workspace = get_allocator<Device::CUDA>().allocate(workspace_size);
+-        last_workspace_size = workspace_size;
++        try {
++          workspace = get_allocator<Device::CUDA>().allocate(workspace_size);
++          last_workspace_size = workspace_size;
++        } catch (...) {
++          workspace = nullptr;
++          workspace_size = 0;
++        }
+       }
+       {
+       miopenConvAlgoPerf_t convForwardAlgos;

@@ -141,6 +141,24 @@ class TestGfx803:
 
         assert providers_all(ctx, ROCM_EP, "needs_static_shapes") == [False]
 
+    def test_installs_the_conv_fusion_guard_for_the_rocm_ep(self, ctx, fake_ort):
+        register(ctx)
+
+        session = fake_ort.InferenceSession(
+            "clap.onnx", providers=[(ROCM_EP, {"device_id": 0}),
+                                    "CPUExecutionProvider"])
+        entries = session.sess_options.config_entries
+        assert entries == {
+            "optimization.disable_specified_optimizers": "ConvActivationFusion"}
+
+    def test_the_guard_leaves_migraphx_sessions_alone(self, ctx, fake_ort):
+        register(ctx)
+
+        session = fake_ort.InferenceSession(
+            "musicnn.onnx", providers=[(MIGRAPHX, {"device_id": 0}),
+                                       "CPUExecutionProvider"])
+        assert session.sess_options is None
+
     def test_falls_back_to_per_model_cache_files(self, ctx, cache_root):
         register(ctx)
 

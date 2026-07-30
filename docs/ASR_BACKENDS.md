@@ -23,17 +23,20 @@ MIOpen at all, which turns out to matter a great deal here (see below).
 
 - `whisper.cpp` built with `GGML_HIP` works fine - correct transcript, GPU
   used (`ROCm0` backend confirmed in logs).
-- `faster-whisper` (CTranslate2-rocm) does not: every compute type
-  (`float16`, `float32`, `int8`, `int8_float32`) fails, and *not*
-  consistently - the original `float16` default sometimes produced real
-  output and sometimes crashed outright, same nondeterministic-fault pattern
-  documented for musicnn's fused-conv crashes in `ARCH_NOTES.md`. With
-  `float32`/`float16`/`int8` the failure mode is a hard `CUDA failed with
-  error out of memory` (a real GPU fault, not an allocator quirk - VRAM was
-  never actually full); `int8_float32` is worse, silently returning
-  empty/wrong-language garbage instead of erroring. See
-  `local-test/verify_whisper_compute_types.py` for the isolation script that
-  nailed this down.
+- `faster-whisper` (CTranslate2-rocm) works on exactly one configuration:
+  **`float16` + `CT2_CUDA_ALLOCATOR=cub_caching` + the conv1d workspace patch**
+  (`docker/patches/gfx803/conv1d-workspace-cap.patch`). The apparent
+  every-compute-type breakage was three separable bugs stacked on top of each
+  other - CT2's default `hipMallocAsync` allocator page-faulting (fixed by
+  cub_caching), MIOpen demanding a spurious ~1.44GB Conv1D workspace whose
+  failed allocation surfaced as a fake `CUDA failed with error out of memory`
+  (fixed by the patch), and the fp32 GEMM path computing garbage. With the
+  first two fixed, `float16` transcribes correctly and deterministically
+  (30/30 reload-churn iterations on the JFK sample), while `float32` still
+  produces multilingual token salad (rocBLAS sgemm broken on this arch;
+  same model + audio correct on CPU) and `int8_float32` silently returns
+  empty text - those two stay unusable. Full write-up:
+  `ARCH_NOTES.md`, "faster-whisper on gfx803".
 - Parakeet-TDT 0.6B (NVIDIA NeMo, ~20+ layer Conformer encoder + TDT decoder)
   is broken via HIP regardless of which framework serves it:
   - NeMo + PyTorch (our own working torch/torchaudio, forced fp32, forced

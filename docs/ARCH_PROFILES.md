@@ -82,6 +82,25 @@ def extra_providers(self, providers):
     return (ProviderSpec(ROCM, {"device_id": 0}, only_models=("clap",)),)
 ```
 
+If the provider is only safe with one of ORT's graph optimizers turned off for
+that session (gfx803's ROCM EP + CLAP needs `ConvActivationFusion` disabled —
+see [ARCH_NOTES.md](ARCH_NOTES.md#clap-on-the-rocm-ep-needs-convactivationfusion-disabled)
+for why), name it in `disable_optimizers` instead of adding a seam in core:
+
+```python
+return (ProviderSpec(
+    ROCM, {"device_id": 0}, only_models=("clap",),
+    disable_optimizers=("ConvActivationFusion",),
+),)
+```
+
+`register()` applies this by wrapping `onnxruntime.InferenceSession` for the
+lifetime of the worker process (`ort_fusion_guard.py`) rather than a core seam,
+because onnxruntime has no environment variable for
+`optimization.disable_specified_optimizers` and core builds its own
+`SessionOptions`. The wrap is scoped by provider name, so it only touches
+sessions that actually use the named provider.
+
 Valid labels are core's: `musicnn`, `clap`, `clap_text`, `whisper_encoder`,
 `whisper_decoder`, `gte`, `silero_vad`. An unknown one matches nothing and is
 warned about.

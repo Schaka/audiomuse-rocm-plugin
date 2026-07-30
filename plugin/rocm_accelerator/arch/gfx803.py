@@ -52,7 +52,17 @@ class Gfx803Profile(ArchProfile):
     def extra_providers(self, providers):
         # musicnn deliberately does not get the ROCM EP: MIOpen's fusion path
         # for Conv+Bias+Activation corrupts GPU state on this arch and faults
-        # non-deterministically. CLAP has no fused conv and has proven stable.
+        # non-deterministically. CLAP's conv stem reaches that same fusion
+        # path through ORT's ConvActivationFusion optimizer (its FusedConv
+        # nodes run as miopenSp3AsmConvRxSU_CBA / MIOpenConvUniBatchNormActiv,
+        # which intermittently read past their weight buffers and page-fault
+        # the GPU), so that optimizer is disabled for CLAP's sessions and the
+        # convs run unfused, which is stable. Fault analysis: docs/ARCH_NOTES.md.
         if ROCM not in providers:
             return ()
-        return (ProviderSpec(ROCM, {"device_id": 0}, only_models=("clap",)),)
+        return (ProviderSpec(
+            ROCM,
+            {"device_id": 0},
+            only_models=("clap",),
+            disable_optimizers=("ConvActivationFusion",),
+        ),)

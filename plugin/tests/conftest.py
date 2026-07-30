@@ -33,6 +33,45 @@ def _install_core_stubs():
 _api = _install_core_stubs()
 
 
+class FakeSessionOptions:
+    def __init__(self):
+        self.config_entries = {}
+
+    def add_session_config_entry(self, key, value):
+        self.config_entries[key] = value
+
+
+class FakeInferenceSession:
+    """Records its constructor arguments; never touches a real runtime."""
+
+    def __init__(self, path_or_bytes, sess_options=None, providers=None,
+                 provider_options=None, **kwargs):
+        self.path_or_bytes = path_or_bytes
+        self.sess_options = sess_options
+        self.providers = providers
+        self.provider_options = provider_options
+
+
+def _fresh_ort_module():
+    ort = types.ModuleType("onnxruntime")
+    ort.SessionOptions = FakeSessionOptions
+    ort.InferenceSession = FakeInferenceSession
+    ort.get_available_providers = lambda: ["CPUExecutionProvider"]
+    return ort
+
+
+@pytest.fixture(autouse=True)
+def fake_ort(monkeypatch):
+    """A fresh fake onnxruntime per test, so the fusion guard's wrapping of
+    ``ort.InferenceSession`` (module-global by design) cannot leak across tests."""
+    from plugin.rocm_accelerator import ort_fusion_guard
+
+    ort = _fresh_ort_module()
+    monkeypatch.setitem(sys.modules, "onnxruntime", ort)
+    monkeypatch.setattr(ort_fusion_guard, "_rules", {})
+    return ort
+
+
 @pytest.fixture(autouse=True)
 def _isolate_environ(monkeypatch):
     """Give every test a throwaway environment.

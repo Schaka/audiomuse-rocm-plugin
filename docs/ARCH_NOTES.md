@@ -74,10 +74,10 @@ basis:
 
 ### musicnn must never use the ROCM EP
 
-The ROCM EP is stable for CLAP (many hours, zero crashes) but **intermittently
-SIGSEGVs on Conv+Bias+Activation graphs** like musicnn's heads. ORT's optimizer
-fuses those three ops into one node, which the ROCM EP hands to MIOpen's Fusion
-Plan API; on gfx803 that path corrupts GPU state and eventually faults with
+The ROCM EP **intermittently SIGSEGVs on Conv+Bias+Activation graphs** like
+musicnn's heads. ORT's optimizer fuses those three ops into one node, which the
+ROCM EP hands to MIOpen's Fusion Plan API; on gfx803 that path corrupts GPU
+state and eventually faults with
 `Memory access fault … Page not present or supervisor privilege`.
 
 Ruled out on hardware, each individually: stale find-db (deleting the shipped
@@ -92,16 +92,79 @@ MIGraphX is also simply faster for musicnn here (~22ms vs ~26–30ms mean per
 inference, when the ROCM EP does not crash). Full write-up in the
 [base image repo](https://github.com/Schaka/rocm-migraphx-ort-builder/blob/main/gfx803/README.md#known-runtime-issue-rocmexecutionprovider-crashes-on-fused-conv-musicnn-class-models).
 
-### faster-whisper must not default to `float16` either
+### CLAP on the ROCM EP needs `ConvActivationFusion` disabled
 
-The `fp16_supported = False` finding above was applied to MIGraphX only; CTranslate2
-(faster-whisper's backend) kept defaulting to `compute_type="float16"` regardless of
-arch. On gfx803 that doesn't just run slow like the MIGraphX case — the fp16 GEMM
-path fails outright, and CTranslate2's HIP allocator reports it as a plain
-`RuntimeError: CUDA failed with error out of memory` (mid-transcribe, after a
-successful GPU model *load*), indistinguishable from a genuinely full card.
-`whisper_faster._default_compute_type()` now reuses `arch.profile_for(...).fp16_supported`
-so gfx803 gets `int8_float32` unless `LYRICS_WHISPER_FASTER_COMPUTE_TYPE` overrides it.
+CLAP is transformer-dominated, but its conv stem is enough to reach the same
+MIOpen Fusion Plan path: ORT's `ConvActivationFusion` optimizer emits FusedConv
+nodes for it, and the fused kernels (`miopenSp3AsmConvRxSU_CBA`,
+`MIOpenConvUniBatchNormActiv`) intermittently kill the worker with
+`Memory access fault … Page not present or supervisor privilege` on the first
+inference after a session is created. Isolated on hardware (RX 470 8GB,
+ROCm 6.4.4, ORT 1.21.1) with a bare create-session → run → destroy loop against
+`model_epoch_36.onnx`:
+
+- Session churn is the amplifier, not the cause: a churn loop usually dies
+  within a handful of iterations, but a crash on the very first session of a
+  fresh process was also observed. One long-lived session survived 180
+  consecutive inferences. This matches production, where core reloads the CLAP
+  audio model per track (`PER_SONG_MODEL_RELOAD`), so every track rolls the dice.
+- The faulting access is a **read past the end of an ORT arena chunk holding
+  the conv weights** (HSA fault address exactly at the chunk's end boundary,
+  `VM fault … read from 'TC'` in dmesg — a compute kernel, not a DMA engine).
+  Whether the over-read faults depends on whether the neighbouring page is
+  mapped, hence the non-determinism as arena layout shifts between sessions.
+- Ruled out on hardware: SDMA copies (`HSA_ENABLE_SDMA=0` still crashes) and
+  async races (`AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` still crashes;
+  the serialized log pins the fault on the fused kernels above).
+- Disabling only `ConvActivationFusion` via the
+  `optimization.disable_specified_optimizers` session config entry removes
+  every fused kernel from the AMD log (the convs run as plain
+  `miopenSp3AsmConvRxSU` / `naive_conv` + a separate ReLU) and a 200-iteration
+  churn loop then survives where the baseline died within 2.
+
+onnxruntime has no environment variable for this and core builds its own
+`SessionOptions`, so the plugin applies the entry by wrapping
+`onnxruntime.InferenceSession` at registration time — see
+`ort_fusion_guard.py`. The guard keys on the provider chain, which on this
+arch scopes it to exactly the CLAP session.
+
+### faster-whisper on gfx803: `float16` is the only correct compute type
+
+Isolated on the RX 470 with a bare load → transcribe → unload loop against the
+JFK sample (a known transcript makes silent corruption visible), three
+independent failure modes were separated that previously masked one another:
+
+1. **Crash (`Memory access fault … Page not present`), any compute type.**
+   CTranslate2's default HIP allocator is the stream-ordered `hipMallocAsync`
+   mempool, and kernels (the serialized `AMD_LOG_LEVEL=4` trace pins a
+   thrust/rocPRIM scatter from `indexed_fill`, CT2's beam-search token
+   suppression) fault on its pages. `CT2_CUDA_ALLOCATOR=cub_caching` — which
+   the gfx803 profile already sets — eliminates it: 10/10 fp32 and 30/30 fp16
+   churn iterations clean vs a baseline that dies within one or two.
+   `MIOPEN_FIND_MODE`, `MIOPEN_DEBUG_CONV_GEMM=0` and `HSA_ENABLE_SDMA=0` were
+   each tried and change nothing — it is the allocator, full stop.
+2. **Spurious `CUDA failed with error out of memory` mid-transcribe.**
+   `miopenConvolutionForwardGetWorkSpaceSize` reports ~1.44GB for Whisper's
+   first encoder Conv1D — the worst case across all solvers, driven by a
+   GEMM fallback the find never actually picks (every applicable gfx803
+   solver needs zero workspace). When VRAM is tight (CLAP/musicnn resident in
+   the same worker) that allocation fails and kills the transcription. Fixed
+   by `docker/patches/gfx803/conv1d-workspace-cap.patch` in the worker image.
+3. **Silent wrong output.** With the crash and OOM out of the way:
+   `float32` transcribes to multilingual token salad (~1300 chars of garbage
+   for the 108-char JFK line; the same model and audio on CPU are correct, so
+   it is the GPU fp32 GEMM path — rocBLAS sgemm on the resurrected r9nano
+   Tensile logic), and `int8_float32` silently returns empty text.
+   **`float16` transcribes correctly and deterministically** (30/30 identical
+   correct transcripts across model reloads) — GCN 4's lack of packed fp16
+   costs throughput, not correctness, and hgemm is evidently the code path
+   that works. MIOpen's Conv1D is exonerated: it runs in fp32 under every
+   compute type, including the correct fp16 runs.
+
+So faster-whisper keeps CTranslate2's plain `float16` default on this arch;
+`LYRICS_WHISPER_FASTER_COMPUTE_TYPE` still overrides. `float32` and
+`int8_float32` must not be offered as "safe" fallbacks here — they do not
+crash, they lie.
 
 ## gfx1201 (RDNA4: RX 9070 / XT)
 

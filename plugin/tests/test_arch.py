@@ -93,6 +93,14 @@ class TestGfx803:
         assert profile.migraphx_models(providers) == DEFAULT_MIGRAPHX_MODELS
         assert profile.extra_providers(providers) == ()
 
+    def test_clap_on_the_rocm_ep_disables_conv_fusion(self):
+        # ORT's ConvActivationFusion emits FusedConv nodes that MIOpen's
+        # Fusion Plan kernels execute; on this arch those kernels
+        # intermittently read past their weight buffers and page-fault the
+        # GPU, killing the worker mid-analysis.
+        specs = Gfx803Profile().extra_providers((MIGRAPHX, ROCM_EP, CPU))
+        assert specs[0].disable_optimizers == ("ConvActivationFusion",)
+
     def test_blocks_parakeet_cpp_hip(self):
         # Confirmed silent empty output (exit 0, no exception) - see
         # docs/ASR_BACKENDS.md. Every other (backend, variant) combo tested

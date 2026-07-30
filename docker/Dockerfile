@@ -113,9 +113,20 @@ RUN set -eux; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential libopenblas-dev; \
     rm -rf /var/lib/apt/lists/*
+# Arch-specific source fixes, one directory per arch under docker/patches/.
+# Each patch documents its own why/what in its header; applied right after the
+# clone so a patch that stops applying fails the build loudly instead of
+# silently shipping unpatched code.
+COPY docker/patches/ /ct2-patches/
 RUN set -eux; \
     git clone --branch "${CT2_REF}" --depth 1 --recursive "${CT2_REPO}" /ct2-src; \
     cd /ct2-src; \
+    if compgen -G "/ct2-patches/${ROCM_ARCH}/*.patch" > /dev/null; then \
+        for p in "/ct2-patches/${ROCM_ARCH}"/*.patch; do \
+            echo "applying ${p}"; \
+            git apply --verbose "${p}"; \
+        done; \
+    fi; \
     llvm_bin="$(hipconfig -l)"; \
     export HIPCXX="${llvm_bin}/clang"; \
     export HIP_PATH="$(hipconfig -R)"; \
@@ -201,17 +212,63 @@ RUN set -eux; \
 # no libggml*.so/libwhisper.so siblings, no RPATH-into-a-build-tree-that-
 # won't-exist-there problem. System libs (libvulkan.so.1, libstdc++, ...)
 # stay dynamic - those are already in the runner image regardless.
+SHELL ["/bin/bash", "-c"]
+
+# ggml's Vulkan backend generates ~200+ shader variants via vulkan-shaders-gen,
+# which forks a batch of concurrent glslc subprocesses (independent of this
+# RUN's own -j). On resource-pressured shared CI runners that occasionally hits
+# a transient fork()/pipe failure for one shader - but vulkan-shaders-gen.cpp
+# catches that per-shader exception and only logs it, so the tool still exits
+# 0 with that variant silently missing. ggml-vulkan.cpp references every
+# variant unconditionally (not behind a feature-detect #ifdef), so the gap
+# only surfaces later as a cryptic "undefined reference to
+# matmul_id_subgroup_..." at the final link. The sed below turns that swallowed
+# exception into an immediate abort, so a real transient failure is caught
+# where it happens instead of silently corrupting the shader set; the retry
+# loop then has something legitimate to act on. It's arch-independent (pure
+# host-side shader compilation, not cross-compiled per AMDGPU_TARGETS), which
+# is why it hits an unpredictable subset of the arch matrix each run. Same
+# fork-failure -> undefined-reference pattern reported upstream, unfixed as of
+# whisper.cpp v1.9.1: https://github.com/ggml-org/llama.cpp/issues/20868
 FROM ggml-vulkan-deps AS whisper-cpp-vulkan
 ARG WHISPER_CPP_REF
-RUN git clone --depth 1 --branch "${WHISPER_CPP_REF}" https://github.com/ggml-org/whisper.cpp /build
-RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    && cmake --build /build/build -j"$(nproc)" --target whisper-cli
+RUN set -eux; \
+    git clone --depth 1 --branch "${WHISPER_CPP_REF}" https://github.com/ggml-org/whisper.cpp /build; \
+    vk_gen="$(find /build -path '*ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp' -print -quit)"; \
+    test -n "$vk_gen"; \
+    sed -i '/Error executing command for/a\        std::exit(1);' "$vk_gen"
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 3 ]; do \
+        rm -rf /build/build; \
+        cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
+        if cmake --build /build/build -j"$(nproc)" --target whisper-cli; then \
+            break; \
+        fi; \
+        n=$((n+1)); \
+        echo "whisper.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying"; \
+    done; \
+    test -x /build/build/bin/whisper-cli
 
 FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
 ARG PARAKEET_CPP_REF
-RUN git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build
-RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    && cmake --build /build/build -j"$(nproc)" --target parakeet-cli
+RUN set -eux; \
+    git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build; \
+    vk_gen="$(find /build -path '*ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp' -print -quit)"; \
+    test -n "$vk_gen"; \
+    sed -i '/Error executing command for/a\        std::exit(1);' "$vk_gen"
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 3 ]; do \
+        rm -rf /build/build; \
+        cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
+        if cmake --build /build/build -j"$(nproc)" --target parakeet-cli; then \
+            break; \
+        fi; \
+        n=$((n+1)); \
+        echo "parakeet.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying"; \
+    done; \
+    test -x /build/build/examples/cli/parakeet-cli
 
 FROM ${BASE_IMAGE} AS whisper-cpp-hip
 ARG ROCM_ARCH

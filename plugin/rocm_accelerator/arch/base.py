@@ -31,6 +31,10 @@ class ProviderSpec:
     options: Mapping[str, str] = field(default_factory=dict)
     only_models: Tuple[str, ...] = ()
     needs_static_shapes: bool = False
+    #: ORT graph-optimizer names whose output this provider cannot run safely;
+    #: applied per-session by ``ort_fusion_guard`` to every session that uses
+    #: this provider, since core has no seam for per-provider session options.
+    disable_optimizers: Tuple[str, ...] = ()
 
 
 class ArchProfile:
