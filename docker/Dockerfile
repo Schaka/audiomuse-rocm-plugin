@@ -391,11 +391,11 @@ COPY --from=parakeet-cpp-hip /build/build/examples/cli/parakeet-cli /opt/asr-bac
 
 RUN set -eux; \
     mkdir -p /app/model/whisper-cpp /app/model/parakeet-cpp; \
-    curl -fL -o /app/model/whisper-cpp/ggml-base.bin \
-        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin; \
+    curl -fL -o /app/model/whisper-cpp/ggml-small.bin \
+        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin; \
     curl -fL -o /app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf \
         https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-q8_0.gguf; \
-    test -s /app/model/whisper-cpp/ggml-base.bin; \
+    test -s /app/model/whisper-cpp/ggml-small.bin; \
     test -s /app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf
 
 # Application code, analysis models and HF cache from the published core

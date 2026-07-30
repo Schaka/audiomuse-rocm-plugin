@@ -57,7 +57,7 @@ Set by the worker image; override on the container only if you have a reason to.
 | `LYRICS_WHISPER_FASTER_COMPUTE_TYPE` | `float16` |
 | `LYRICS_WHISPER_FASTER_MODEL_DIR` | `/app/model/faster-whisper-small` |
 | `LYRICS_WHISPER_CPP_BIN_DIR` | `/opt/asr-backends/whisper-cpp` (holds `whisper-cli-vulkan`/`whisper-cli-hip`) |
-| `LYRICS_WHISPER_CPP_MODEL` | `/app/model/whisper-cpp/ggml-base.bin` |
+| `LYRICS_WHISPER_CPP_MODEL` | `/app/model/whisper-cpp/ggml-small.bin` |
 | `LYRICS_PARAKEET_CPP_BIN_DIR` | `/opt/asr-backends/parakeet-cpp` (holds `parakeet-cli-vulkan`/`parakeet-cli-hip`) |
 | `LYRICS_PARAKEET_CPP_MODEL` | `/app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf` |
 

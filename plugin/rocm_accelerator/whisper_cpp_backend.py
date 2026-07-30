@@ -40,7 +40,7 @@ _TIMESTAMP_LINE = re.compile(r"^\[[\d:.]+\s*-->\s*[\d:.]+\]\s*(.*)$")
 _LANG_LINE = re.compile(r"lang\s*=\s*([a-zA-Z-]+)")
 
 _BIN_DIR = os.environ.get("LYRICS_WHISPER_CPP_BIN_DIR", "/opt/asr-backends/whisper-cpp").strip()
-_MODEL = os.environ.get("LYRICS_WHISPER_CPP_MODEL", "/app/model/whisper-cpp/ggml-base.bin").strip()
+_MODEL = os.environ.get("LYRICS_WHISPER_CPP_MODEL", "/app/model/whisper-cpp/ggml-small.bin").strip()
 
 _variant = "vulkan"
 _validated = False
