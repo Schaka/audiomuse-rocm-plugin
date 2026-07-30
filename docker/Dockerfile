@@ -88,30 +88,8 @@ RUN set -eux; \
 # name, this is what actually enables their from-scratch MIOpen backend for
 # Conv1D - hipDNN (the old cuDNN-alike) is unmaintained, so upstream CTranslate2
 # has no HIP path for Conv1D at all, and Whisper's encoder opens with two
-# Conv1D layers. Leaving this off (as an earlier version of this Dockerfile
-# did) builds fine and imports fine, but every GPU transcribe then fails at
-# the first Conv1D with "Conv1D on GPU currently requires the cuDNN library
-# which is not integrated in this build" - a runtime failure invisible at
-# build time. MIOpen itself is inherited unmodified from the ROCm base image
-# (see rocm-migraphx-ort-builder/gfx803/Dockerfile.gfx803), so no extra
-# packages are needed here for CMake to find it.
-# Upstream OpenNMT/CTranslate2 (gfx9xx) has no such backend - it doesn't carry
-# arlo-phoenix's patch - so WITH_CUDNN stays off there; turning it on would
-# just fail to find a real cudnn.h. OpenBLAS provides the CPU backend in place
-# of MKL, matching the runtime libs the final image installs.
-# OPENMP_RUNTIME defaults to INTEL, which hard-fails on missing libiomp5 - that
-# only ships with MKL, so it has to follow WITH_MKL=OFF over to the compiler's
-# own libgomp.
-#
-# BUILD_CLI is off both because the `translator` binary is dead weight here -
-# only libctranslate2 and the Python wheel get copied out - and because its
-# vendored cxxopts does not include <cstdint>, which newer libstdc++ no longer
-# pulls in transitively, so it fails on uint8_t regardless of arch.
-#
-# The whole C/CXX build runs through ROCm's clang, not the system GCC: both
-# trees compile plain .cc sources with -x hip, and HIPCXX only covers CMake's
-# HIP language, so GCC gets handed a -x hip it cannot parse ("language hip not
-# recognized"). This is also how both upstream and the fork build themselves.
+# Conv1D layers. Leaving this off builds fine and imports fine,
+# but every GPU transcribe then fails at the first Conv1D with "Conv1D on GPU.
 #
 # CMAKE_POLICY_VERSION_MINIMUM covers third_party/cpu_features, which still asks
 # for cmake_minimum_required below 3.5 - removed outright in the CMake 4 on the
@@ -185,6 +163,81 @@ RUN set -eux; \
 # unselected variant is never executed - the source compile costs nothing on
 # the 8 arches the prebuilt wheel already covers.
 FROM ct2-${CT2_VARIANT} AS ct2
+
+# ============================================================================
+# Stages 3a-3d: whisper.cpp and parakeet.cpp, Vulkan and HIP variants
+# ============================================================================
+# Both engines confirmed working standalone (see docs/ASR_BACKENDS.md) -
+# selectable via the plugin's asr_backend/asr_backend_variant settings, one
+# CLI binary per (engine, variant) pair, both variants of an engine sharing
+# one model file (copied once into the runner stage below).
+#
+# parakeet.cpp's HIP build is skipped on Polaris (gfx803/802/805): confirmed
+# to produce silent empty transcripts there so there is nothing to
+# gain from spending build time and image space on a binary the plugin will
+# never select (Gfx803Profile.blocked_asr_backends refuses it). An empty
+# placeholder is emitted in its place so the runner's COPY --from below has
+# something to copy either way; whisper_cpp_backend.available()/
+# parakeet_cpp_backend.available() check the file is non-empty, not just
+# present, so the placeholder correctly reads as "unavailable".
+FROM ${BASE_IMAGE} AS ggml-vulkan-deps
+RUN set -eux; \
+    DEBIAN_FRONTEND=noninteractive apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git cmake build-essential ca-certificates \
+        libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers glslc spirv-headers; \
+    rm -rf /var/lib/apt/lists/*
+
+FROM ggml-vulkan-deps AS whisper-cpp-vulkan
+RUN git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build
+RUN cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /build/build -j"$(nproc)" --target whisper-cli
+
+FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
+RUN git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build
+RUN cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /build/build -j"$(nproc)" --target parakeet-cli
+
+FROM ${BASE_IMAGE} AS whisper-cpp-hip
+ARG ROCM_ARCH
+SHELL ["/bin/bash", "-c"]
+# hipblas-dev/rocblas-dev: needed by name on gfx803's ROCm 6.4 base; gfx900+'s
+# ROCm 7.14 base already carries its own BLAS dev headers under a different
+# package name (amdrocm-blas-dev7.14 etc.), so this is a no-op there - hence
+# the `|| true` rather than a hard failure on the newer bases.
+RUN set -eux; \
+    DEBIAN_FRONTEND=noninteractive apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        git cmake build-essential ca-certificates; \
+    (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
+    rm -rf /var/lib/apt/lists/*; \
+    git clone --depth 1 https://github.com/ggml-org/whisper.cpp /build; \
+    cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
+    cmake --build /build/build -j"$(nproc)" --target whisper-cli
+
+FROM ${BASE_IMAGE} AS parakeet-cpp-hip
+ARG ROCM_ARCH
+SHELL ["/bin/bash", "-c"]
+RUN set -eux; \
+    case "${ROCM_ARCH}" in \
+        gfx803|gfx802|gfx805) \
+            echo "parakeet.cpp HIP skipped on ${ROCM_ARCH} - confirmed broken, see docs/ASR_BACKENDS.md"; \
+            mkdir -p /build/build/examples/cli; \
+            : > /build/build/examples/cli/parakeet-cli; \
+            ;; \
+        *) \
+            DEBIAN_FRONTEND=noninteractive apt-get update; \
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                git cmake build-essential ca-certificates; \
+            (DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hipblas-dev rocblas-dev || true); \
+            rm -rf /var/lib/apt/lists/*; \
+            git clone --recursive --depth 1 https://github.com/mudler/parakeet.cpp /build; \
+            cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release \
+                -DPARAKEET_GGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
+            cmake --build /build/build -j"$(nproc)" --target parakeet-cli; \
+            ;; \
+    esac
 
 # ============================================================================
 # Stage 2: runner - ROCm base (MIGraphX ONNX Runtime) + app deps
@@ -318,6 +371,24 @@ for compute in ("int8", "float32"):
 else:
     raise SystemExit("faster-whisper model failed to load on CPU with any compute type")
 PY
+
+# whisper.cpp and parakeet.cpp: Vulkan and HIP CLI binaries, selectable via
+# the plugin's asr_backend/asr_backend_variant settings (see
+# plugin/rocm_accelerator/whisper_cpp_backend.py and parakeet_cpp_backend.py).
+# Both variants of an engine share one model file - only the binary differs.
+COPY --from=whisper-cpp-vulkan /build/build/bin/whisper-cli /opt/asr-backends/whisper-cpp/whisper-cli-vulkan
+COPY --from=whisper-cpp-hip /build/build/bin/whisper-cli /opt/asr-backends/whisper-cpp/whisper-cli-hip
+COPY --from=parakeet-cpp-vulkan /build/build/examples/cli/parakeet-cli /opt/asr-backends/parakeet-cpp/parakeet-cli-vulkan
+COPY --from=parakeet-cpp-hip /build/build/examples/cli/parakeet-cli /opt/asr-backends/parakeet-cpp/parakeet-cli-hip
+
+RUN set -eux; \
+    mkdir -p /app/model/whisper-cpp /app/model/parakeet-cpp; \
+    curl -fL -o /app/model/whisper-cpp/ggml-base.bin \
+        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin; \
+    curl -fL -o /app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf \
+        https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/tdt-0.6b-v3-q8_0.gguf; \
+    test -s /app/model/whisper-cpp/ggml-base.bin; \
+    test -s /app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf
 
 # Application code, analysis models and HF cache from the published core
 # image (last, for cache hits when only BASE_IMAGE/ROCm layers change). Docker

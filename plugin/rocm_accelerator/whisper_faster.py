@@ -192,10 +192,13 @@ def transcribe(
                 logprobs.append(float(lp))
     except Exception:
         # Decode runs lazily inside the generator; a mid-stream failure (GPU OOM,
-        # CTranslate2 error) keeps whatever segments already decoded.
+        # CTranslate2 error) keeps whatever segments already decoded. VRAM is
+        # logged because a spurious "out of memory" from the HIP allocator is
+        # otherwise indistinguishable from a genuinely full card.
         logger.exception(
-            "faster-whisper decode failed after %d segment(s) - returning partial text",
+            "faster-whisper decode failed after %d segment(s) - %s - returning partial text",
             len(texts),
+            _vram_status(),
         )
 
     info_dur = getattr(info, "duration", None)

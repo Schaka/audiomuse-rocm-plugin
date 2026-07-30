@@ -26,6 +26,12 @@ class Gfx803Profile(ArchProfile):
     # passing it fails session creation and drops the whole EP to CPU.
     supports_model_cache_dir = False
 
+    # parakeet.cpp's HIP build returns a silent empty transcript on this arch
+    # (exit 0, no exception) - confirmed via local-test/asr_backends/parakeet_cpp.sh,
+    # while the same binary on Vulkan and whisper.cpp on either backend both
+    # produce correct transcripts. See docs/ASR_BACKENDS.md for the full matrix.
+    blocked_asr_backends = frozenset({("parakeet_cpp", "hip")})
+
     def migraphx_models(self, providers):
         # CLAP's audio graph has a Resize node this MIGraphX release refuses to
         # parse, so MIGraphX could never serve CLAP here - and pairing it with

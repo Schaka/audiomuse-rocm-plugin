@@ -5,6 +5,7 @@ import pytest
 from plugin.rocm_accelerator import arch
 from plugin.rocm_accelerator.arch.base import DEFAULT_MIGRAPHX_MODELS, ArchProfile
 from plugin.rocm_accelerator.arch.gfx803 import Gfx803Profile
+from plugin.rocm_accelerator.arch.gfx1201 import Gfx1201Profile
 
 MIGRAPHX = "MIGraphXExecutionProvider"
 ROCM_EP = "ROCMExecutionProvider"
@@ -16,10 +17,15 @@ def test_polaris_arches_get_their_own_profile(arch_name):
     assert isinstance(arch.profile_for(arch_name), Gfx803Profile)
 
 
-@pytest.mark.parametrize("arch_name", ["gfx900", "gfx906", "gfx1030", "gfx1201", None, ""])
+@pytest.mark.parametrize("arch_name", ["gfx900", "gfx906", "gfx1030", None, ""])
 def test_arches_without_a_profile_get_the_defaults(arch_name):
     profile = arch.profile_for(arch_name)
     assert type(profile) is ArchProfile
+
+
+@pytest.mark.parametrize("arch_name", ["gfx1201"])
+def test_gfx1201_gets_its_own_profile(arch_name):
+    assert isinstance(arch.profile_for(arch_name), Gfx1201Profile)
 
 
 def test_defaults_change_nothing():
@@ -27,6 +33,7 @@ def test_defaults_change_nothing():
     providers = (MIGRAPHX, ROCM_EP, CPU)
     assert profile.fp16_supported is True
     assert profile.supports_model_cache_dir is True
+    assert profile.blocked_asr_backends == frozenset()
     assert profile.env == {}
     assert profile.migraphx_options() == {}
     assert profile.migraphx_models(providers) == DEFAULT_MIGRAPHX_MODELS
@@ -86,6 +93,18 @@ class TestGfx803:
         assert profile.migraphx_models(providers) == DEFAULT_MIGRAPHX_MODELS
         assert profile.extra_providers(providers) == ()
 
+    def test_blocks_parakeet_cpp_hip(self):
+        # Confirmed silent empty output (exit 0, no exception) - see
+        # docs/ASR_BACKENDS.md. Every other (backend, variant) combo tested
+        # on this arch works, so nothing else is blocked here.
+        profile = Gfx803Profile()
+        assert profile.blocked_asr_backends == frozenset({("parakeet_cpp", "hip")})
+
+
+class TestGfx1201:
+    def test_declares_cub_caching(self):
+        profile = Gfx1201Profile()
+        assert profile.env == {"CT2_CUDA_ALLOCATOR": "cub_caching"}
 
 class TestApplyEnv:
     def test_sets_the_profiles_variables(self, monkeypatch):

@@ -13,8 +13,11 @@ Runs the analysis models AMD GPUs can handle on the GPU, using two core seams:
 * ``register_onnx_provider`` for musicnn and the CLAP audio encoder, via ONNX
   Runtime's MIGraphX provider. Scoped to those labels because the Whisper
   decoder's graph cannot be compiled by MIGraphX at all.
-* ``register_analysis_provider('asr', ...)`` to swap lyrics ASR to
-  faster-whisper, for the same reason.
+* ``register_analysis_provider('asr', ...)`` to swap lyrics ASR off the built-in
+  ONNX Whisper, for the same reason. Which engine (faster-whisper, whisper.cpp,
+  parakeet.cpp) and build variant (Vulkan/HIP) is chosen via the
+  ``asr_backend``/``asr_backend_variant`` settings, filtered through the arch
+  profile's ``blocked_asr_backends`` - see docs/ASR_BACKENDS.md.
 
 Anything that has to differ per GPU generation lives in ``arch/``, not here.
 The ROCm runtime itself comes from the ROCm worker image; on any other image
@@ -31,12 +34,50 @@ from .providers import MIGRAPHX
 logger = logging.getLogger("plugin.rocm_accelerator")
 
 
-def _asr_factory():
-    # Imported lazily so non-ROCm images never load a faster-whisper backend
-    # they have no libraries for.
-    from . import whisper_faster
+def _resolve_asr_backend(profile):
+    backend = str(get_setting("asr_backend", "faster_whisper")).strip() or "faster_whisper"
+    variant = str(get_setting("asr_backend_variant", "vulkan")).strip() or "vulkan"
+    if (backend, variant) in profile.blocked_asr_backends:
+        logger.warning(
+            "%s + %s is known broken on %s - falling back to the vulkan variant",
+            backend, variant, profile,
+        )
+        variant = "vulkan"
+        if (backend, variant) in profile.blocked_asr_backends:
+            logger.warning(
+                "%s has no working variant on %s - falling back to faster_whisper",
+                backend, profile,
+            )
+            backend = "faster_whisper"
+    return backend, variant
 
-    return whisper_faster
+
+def _asr_factory_for(backend, variant):
+    # Imported lazily so non-ROCm images never load a backend they have no
+    # libraries/binaries for.
+    if backend == "whisper_cpp":
+        from . import whisper_cpp_backend as module
+    elif backend == "parakeet_cpp":
+        from . import parakeet_cpp_backend as module
+    else:
+        from . import whisper_faster as module
+
+    configure = getattr(module, "configure", None)
+    if configure is not None:
+        configure(variant)
+    return module
+
+
+def _asr_available(backend, variant):
+    if backend == "whisper_cpp":
+        from . import whisper_cpp_backend as module
+    elif backend == "parakeet_cpp":
+        from . import parakeet_cpp_backend as module
+    else:
+        return gpu.faster_whisper_available()
+
+    available = getattr(module, "available", None)
+    return available(variant) if available is not None else True
 
 
 def _resolve_fp16(profile, arch_name):
@@ -127,11 +168,18 @@ def register(ctx):
             spec.name, ", ".join(spec.only_models) or "all models",
         )
 
-    if gpu.faster_whisper_available():
-        ctx.register_analysis_provider("asr", _asr_factory)
-        logger.info("Registered faster-whisper as the ASR backend (AMD GPU)")
+    asr_backend, asr_variant = _resolve_asr_backend(profile)
+    if _asr_available(asr_backend, asr_variant):
+        ctx.register_analysis_provider(
+            "asr", lambda: _asr_factory_for(asr_backend, asr_variant)
+        )
+        logger.info(
+            "Registered %s (variant=%s) as the ASR backend (AMD GPU)",
+            asr_backend, asr_variant,
+        )
     else:
         logger.warning(
-            "faster_whisper not importable - lyrics ASR stays on the ONNX backend (CPU). "
-            "musicnn acceleration is unaffected."
+            "%s (variant=%s) unavailable on this image - lyrics ASR stays on the "
+            "ONNX backend (CPU). musicnn acceleration is unaffected.",
+            asr_backend, asr_variant,
         )

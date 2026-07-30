@@ -10,8 +10,12 @@ other image it registers nothing and stays out of the way.
   `MIGraphXExecutionProvider`, scoped to those two session labels. The Whisper
   encoder and decoder are excluded because MIGraphX cannot compile the decoder
   graph.
-- **lyrics ASR** runs on faster-whisper (CTranslate2's ROCm backend) instead of
-  the built-in ONNX Whisper, for the same reason.
+- **lyrics ASR** runs on faster-whisper (CTranslate2), whisper.cpp, or
+  parakeet.cpp (NVIDIA Parakeet-TDT) instead of the built-in ONNX Whisper, for
+  the same reason. Which engine and build variant (Vulkan/HIP) is picked via
+  the `asr_backend`/`asr_backend_variant` settings below - see
+  [ASR_BACKENDS.md](https://github.com/Schaka/audiomuse-rocm-plugin/blob/main/docs/ASR_BACKENDS.md)
+  for what's confirmed working per arch.
 
 CLAP's text encoder and clustering stay on CPU: the text encoder runs Flask-side
 with runtime-variable batch shapes, and the clustering library (RAPIDS cuML) has
@@ -31,6 +35,8 @@ Edit from the Settings button on the admin Plugins page.
 | Setting | Default | Effect |
 | --- | --- | --- |
 | `fp16_enable` | `true` | Sets `migraphx_fp16_enable`. Ignored on arches whose profile reports no usable fp16. |
+| `asr_backend` | `faster_whisper` | Lyrics ASR engine: `faster_whisper` (CTranslate2), `whisper_cpp`, or `parakeet_cpp` (NVIDIA Parakeet-TDT). See [ASR_BACKENDS.md](https://github.com/Schaka/audiomuse-rocm-plugin/blob/main/docs/ASR_BACKENDS.md) for what's been confirmed working per arch. |
+| `asr_backend_variant` | `vulkan` | `vulkan` or `hip`, for `whisper_cpp`/`parakeet_cpp` only (ignored for `faster_whisper`, which always uses CTranslate2's own HIP path). A combination an arch profile lists in `blocked_asr_backends` is refused with a log warning and falls back to `vulkan`, then to `faster_whisper` if even that is blocked. |
 
 ## Environment
 
@@ -41,6 +47,10 @@ Set by the worker image; override on the container only if you have a reason to.
 | `LYRICS_WHISPER_FASTER_DEVICE` | `cuda` (CTranslate2 mirrors the CUDA API on ROCm, so this means the AMD GPU) |
 | `LYRICS_WHISPER_FASTER_COMPUTE_TYPE` | `float16` |
 | `LYRICS_WHISPER_FASTER_MODEL_DIR` | `/app/model/faster-whisper-small` |
+| `LYRICS_WHISPER_CPP_BIN_DIR` | `/opt/asr-backends/whisper-cpp` (holds `whisper-cli-vulkan`/`whisper-cli-hip`) |
+| `LYRICS_WHISPER_CPP_MODEL` | `/app/model/whisper-cpp/ggml-base.bin` |
+| `LYRICS_PARAKEET_CPP_BIN_DIR` | `/opt/asr-backends/parakeet-cpp` (holds `parakeet-cli-vulkan`/`parakeet-cli-hip`) |
+| `LYRICS_PARAKEET_CPP_MODEL` | `/app/model/parakeet-cpp/tdt-0.6b-v3-q8_0.gguf` |
 
 An arch profile may set additional variables, but never overrides one already
 set on the container.

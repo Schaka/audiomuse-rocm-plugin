@@ -58,6 +58,14 @@ class ArchProfile:
     #: fails session creation outright when passed.
     supports_model_cache_dir: bool = True
 
+    #: (asr_backend, asr_backend_variant) pairs known to fail on this arch
+    #: without raising anything catchable - e.g. parakeet.cpp's HIP build
+    #: returns a silent empty transcript on gfx803 (exit 0, no exception),
+    #: which the normal "GPU load failed, fall back" path never sees. Refused
+    #: at settings resolution instead of left to run and quietly produce no
+    #: lyrics. See docs/ASR_BACKENDS.md for the findings behind each entry.
+    blocked_asr_backends: frozenset = frozenset()
+
     def migraphx_options(self) -> Mapping[str, str]:
         """Extra MIGraphX EP options, merged over the ones built generically."""
         return {}
