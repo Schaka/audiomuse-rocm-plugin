@@ -17,9 +17,10 @@ other image it registers nothing and stays out of the way.
   [ASR_BACKENDS.md](https://github.com/Schaka/audiomuse-rocm-plugin/blob/main/docs/ASR_BACKENDS.md)
   for what's confirmed working per arch.
 
-CLAP's text encoder and clustering stay on CPU: the text encoder runs Flask-side
-with runtime-variable batch shapes, and the clustering library (RAPIDS cuML) has
-no ROCm port.
+CLAP's audio encoder runs on GPU like musicnn (see above). Two other things
+stay on CPU: CLAP's *text* encoder, which runs Flask-side with
+runtime-variable batch shapes, and clustering, because its library (RAPIDS
+cuML) has no ROCm port and no GPU replacement has been built for it yet.
 
 Some GPU generations need this set up differently — no fp16, a different
 provider for one model, extra environment. That lives in
