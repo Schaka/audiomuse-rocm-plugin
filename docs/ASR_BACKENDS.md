@@ -31,18 +31,14 @@ dependency on rocBLAS, Tensile, or MIOpen.
   (rocBLAS sgemm broken on this arch; same model + audio correct on CPU) and
   `int8_float32` silently returns empty text - both stay unusable. Full
   write-up: `ARCH_NOTES.md`, "faster-whisper on gfx803".
-- Parakeet-TDT 0.6B (NVIDIA NeMo, ~20+ layer Conformer encoder + TDT decoder)
-  was broken via HIP as of the last test, regardless of framework:
-  - NeMo + PyTorch (forced fp32, forced "math" SDPA to rule out
-    flash-attention): degenerate repeated-token output, e.g. `"and and and
-    and and and in in in and"`.
-  - `parakeet.cpp` built with `PARAKEET_GGML_HIP` (from-scratch, zero shared
-    code with NeMo/PyTorch): silent **empty** output on GPU, `exit 0`, no
-    error. Same input on CPU (same binary, no `--device` passthrough):
-    perfect transcript with word-level timestamps.
+- Parakeet-TDT 0.6B via `parakeet.cpp` built with `PARAKEET_GGML_HIP`
+  (~20+ layer Conformer encoder + TDT decoder): silent **empty** output on
+  GPU, `exit 0`, no error, as of the last test. Same input on CPU (same
+  binary, no `--device` passthrough): perfect transcript with word-level
+  timestamps.
 
   **Needs re-testing** - the faster-whisper fixes above (allocator, workspace
-  patch) landed after this Parakeet probe and weren't yet applied when it ran.
+  patch) landed after this probe and weren't yet applied when it ran.
 
 ### Verdict for gfx803
 
@@ -54,21 +50,16 @@ Parakeet-TDT via HIP is unconfirmed pending re-test.
 
 Not part of the gfx803 investigation above - HIP is expected to actually work
 correctly here (no history of the Tensile kernel-selection class of bug on
-supported/current architectures), so the plan is broader: offer
-**parakeet.cpp with HIP** and **NeMo + Parakeet** (our own working
-torch/torchaudio, no upstream wheel pins) as real backend options, not just
-Vulkan.
+supported/current architectures), so `parakeet.cpp` with HIP is a real backend
+option, not just Vulkan.
 
-Both confirmed working, smoke-tested against an RX 9070 XT (gfx1201) on the
+Confirmed working, smoke-tested against an RX 9070 XT (gfx1201) on the
 plugin's own `rocm-migraphx-ort-torch-builder` base image (ROCm 7.14):
 
 - `parakeet.cpp` built with `PARAKEET_GGML_HIP`: correct transcript,
   `ROCm0` backend, no crash, no garbage - the exact opposite of gfx803's
   result with the identical binary/model/build flags. Confirms the gfx803
   bug is arch-specific, not something inherent to HIP + Parakeet.
-- NeMo + PyTorch, same setup as the gfx803 probe (our own torch, no forced
-  fp32/SDPA overrides needed - defaulted to `torch.float32` on its own):
-  perfect transcript, ~7.5s.
 
 One packaging note from getting this running: gfx1201's base image is on
 ROCm 7.14, which renamed the hipBLAS/rocBLAS dev packages
@@ -80,8 +71,8 @@ either: ROCm 7.14's base image already carries its own BLAS dev headers.
 
 `faster_whisper`, `whisper_cpp` and `parakeet_cpp` are all shipped and
 selectable via the `asr_backend` setting (see the
-[plugin README](../plugin/rocm_accelerator/README.md#settings)). NeMo/Parakeet
-is not shipped yet. Remaining notes from the investigation:
+[plugin README](../plugin/rocm_accelerator/README.md#settings)). Remaining
+notes from the investigation:
 
 - Every backend's runtime dependencies need to be in the image the plugin
   ships (the plugin itself carries no pip requirements) - same pattern
@@ -92,6 +83,15 @@ is not shipped yet. Remaining notes from the investigation:
   reason to bake in duplicate copies of the same weights just because two
   backends can serve them.
 - gfx803 only ever needs the Vulkan variant of each backend; gfx900+ images
-  can carry HIP variants (and NeMo) instead, keeping gfx803 images smaller
-  and avoiding shipping a HIP path on that arch that's known broken for
-  anything but whisper.cpp.
+  can carry HIP variants instead, keeping gfx803 images smaller and avoiding
+  shipping a HIP path on that arch that's known broken for anything but
+  whisper.cpp.
+
+## Canary models
+
+`parakeet.cpp` only covers the Parakeet family (CTC/RNNT/TDT/hybrid,
+0.6B/1.1B/110M, English + multilingual v3) - no Canary support.
+[CrispASR](https://github.com/CrispStrobe/CrispASR), a whisper.cpp fork with a
+broader ggml model zoo, can run Canary GGUFs (`crispasr -m
+canary-1b-v2.gguf`). Not evaluated against any of our arches yet; worth a look
+if Canary support is ever needed.
