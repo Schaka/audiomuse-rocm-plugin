@@ -17,51 +17,77 @@ On any other image the plugin registers nothing.
 
 Requires AudioMuse-AI **3.1.0 or newer**.
 
-## Quick start
-
-**1. Find your GPU's arch:**
+## 1. Pick your image
 
 ```bash
 rocminfo | grep gfx
 ```
 
-**2. Pick the matching tag.** One tag per arch — several arches' ROCm kernels do
-not fit in one image.
+One tag per arch — several arches' ROCm kernels do not fit in one image.
 
 | Tag | GPUs |
 | --- | --- |
-| `latest-gfx1201`, `latest-gfx1200` | RDNA4 (RX 9070 …) |
-| `latest-gfx1100`, `-gfx1101`, `-gfx1102` | RDNA3 (RX 7000) |
-| `latest-gfx1150`, `-gfx1151` | Strix / Strix Halo APUs |
-| `latest-gfx1030` | RDNA2 (RX 6000) |
-| `latest-gfx900`, `-gfx906`, `-gfx908`, `-gfx90a`, `-gfx942` | Vega / CDNA |
+| `latest-gfx1201`, `-gfx1200` | RDNA4 (RX 9070 …) |
+| `latest-gfx1100`, `-gfx1101`, `-gfx1102`, `-gfx1103` | RDNA3 (RX 7000, RDNA3 APUs) |
+| `latest-gfx1150`, `-gfx1151`, `-gfx1152`, `-gfx1153` | Phoenix / Strix / Strix Halo APUs |
+| `latest-gfx1030`, `-gfx1031`, `-gfx1032`, `-gfx1033`, `-gfx1034`, `-gfx1035`, `-gfx1036` | RDNA2 (RX 6000, RDNA2 APUs) |
+| `latest-gfx1010`, `-gfx1011`, `-gfx1012` | RDNA1 (RX 5000) |
+| `latest-gfx900`, `-gfx90c`, `-gfx906`, `-gfx908`, `-gfx90a`, `-gfx942`, `-gfx950` | Vega / CDNA |
 | `latest-gfx803` | Polaris (RX 460–590) — experimental, see [docs/ARCH_NOTES.md](docs/ARCH_NOTES.md) |
 
 Also published: `:<version>-<arch>` pinned to an upstream release, and
 `:unstable-<arch>` / `:unstable-<YYYYMMDD>-<arch>` built nightly against
 upstream's `:devel`.
 
-**3. Run it.** [`examples/docker-compose.yaml`](examples/docker-compose.yaml) is
-a complete stack — GPU passthrough, group ids, cache volumes:
+## 2. Wire it into your compose file
 
-```bash
-ROCM_ARCH=gfx1030 docker compose -f examples/docker-compose.yaml up -d
+If you already run upstream's
+[`docker-compose.yaml`](https://github.com/NeptuneHub/AudioMuse-AI/blob/main/deployment/docker-compose.yaml),
+the change is: swap the worker's image, pass through the GPU, and mount a
+cache volume. Nothing else in your existing stack needs to move.
+
+```yaml
+  audiomuse-ai-worker:
+    image: ghcr.io/schaka/audiomuse-ai-rocm:latest-gfx1030  # <- your arch from step 1
+    container_name: audiomuse-ai-worker-instance
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # image ships no render/video group; pass the host's numeric GIDs
+    # (getent group render video)
+    group_add:
+      - "105"
+      - "39"
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    volumes:
+      - migraphx-cache:/app/.cache/migraphx
+      - miopen-cache:/app/.cache/miopen
 ```
 
-**4. Add the plugin repository.** In the UI, **Plugins → Repositories**, add:
+The two cache volumes hold MIGraphX's and MIOpen's compiled-kernel caches.
+Without them, every container restart recompiles the ONNX graphs and GPU
+kernels from scratch, which costs minutes before the first analysis can start;
+with the volume mounted, a restart reuses what was already compiled. See
+[MIGraphX cache details](plugin/rocm_accelerator/README.md#compiled-model-cache)
+for why it's split into `fp16`/`fp32` subdirectories internally.
 
-```
-https://github.com/Schaka/audiomuse-rocm-plugin/releases/latest/download/repository.json
-```
+A complete stack — Postgres, Redis, both services, GPU passthrough, group ids,
+cache volumes — is at
+[`examples/docker-compose.yaml`](examples/docker-compose.yaml). Copy it,
+replace the arch in `x-rocm-image`, fill in your media server, `docker compose
+up -d`.
 
-**5. Install.** Refresh the catalog, install **ROCm Accelerator (AMD)** from the
-Catalog tab, apply the restart.
+## 3. Configure the plugin
 
-**6. Check it worked.** The worker log should show a MIGraphX provider chain for
-musicnn and faster-whisper for lyrics; `rocm-smi` on the host should show the
-worker using the GPU during an analysis.
+Settings, environment variables and the compiled-model cache layout are
+documented in the
+[plugin README](plugin/rocm_accelerator/README.md#settings) — edit them from
+**Plugins → ROCm Accelerator (AMD) → Settings** in the UI, which opens a raw
+JSON editor for the whole settings object.
 
-## Where to get the plugin
+## 4. Get the plugin
 
 Two routes. Either works; they publish the same plugin id, so **add one, not
 both** — an unstable build sorts above the stable release it was built from.
@@ -88,9 +114,16 @@ https://github.com/Schaka/audiomuse-rocm-plugin/releases/latest/download/reposit
 https://github.com/Schaka/audiomuse-rocm-plugin/releases/download/unstable/repository.json
 ```
 
+Add it in **Plugins → Repositories**, refresh the catalog, install **ROCm
+Accelerator (AMD)** from the Catalog tab, apply the restart.
+
 Replacing the community catalog entirely (rather than adding to it) is possible
 with `PLUGIN_DEFAULT_REPO_URL`, but then no other community plugin is
 installable. Adding a repository in the UI is the better option.
+
+**Check it worked:** the worker log should show a MIGraphX provider chain for
+musicnn and faster-whisper for lyrics; `rocm-smi` on the host should show the
+worker using the GPU during an analysis.
 
 ## Documentation
 
@@ -102,71 +135,9 @@ installable. Adding a repository in the UI is the better option.
 
 ## Development
 
-Two deliverables, two project directories, published by separate workflows:
-
-| | Project | Published as |
-| --- | --- | --- |
-| `plugin/` | the Python plugin — `rocm_accelerator/` is the package that ships, plus `tests/`, `pytest.ini`, `requirements/dev.txt` | zip + catalog on a GitHub release |
-| `docker/` | the ROCm worker image — `Dockerfile`, entrypoint, `requirements/rocm.txt` | `ghcr.io/schaka/audiomuse-ai-rocm` |
-
-`local-test/` composes both, `docs/` and `examples/` belong to neither. The
-image does not contain the plugin: it is installed at runtime through the
-Plugins UI, which is why a plugin change never rebuilds an image.
-
-### Tests
-
-`plugin/` is the Python project — `pytest.ini`, the dev requirements and the
-suite all live there:
-
-```bash
-cd plugin
-pip install -r requirements/dev.txt
-pytest
-```
-
-No GPU and no ROCm stack needed — the suite stubs the arch string and the
-provider list. `jq` and `zip` have to be on `PATH` or the packaging tests skip.
-They gate both publish workflows via `plugin-tests.yml`.
-
-### Run against the working tree
-
-```bash
-docker compose -f local-test/docker-compose-rocm.yaml up --build
-```
-
-Builds `docker/Dockerfile` from source instead of pulling, and runs a
-`plugin-catalog` sidecar that zips `plugin/rocm_accelerator` from the working
-tree and serves it over HTTP. Add `http://plugin-catalog:8099/manifest.json` as
-a repository to install whatever is checked out — no tag, no release, no GitHub
-round trip. Override `ROCM_BASE_IMAGE` for another arch.
-
-`local-test/build-gfx803.sh` does the same for gfx803, which needs a
-source-built CTranslate2 and so several build args set together.
-
-### Against an unreleased core
-
-Add the `docker-compose-source.yaml` overlay to build core from a branch. Core
-first, since the ROCm image does `FROM ${CORE_IMAGE}`:
-
-```bash
-COMPOSE="-f local-test/docker-compose-rocm.yaml -f local-test/docker-compose-source.yaml"
-docker compose $COMPOSE --profile core build audiomuse-ai-core
-docker compose $COMPOSE up --build
-```
-
-Defaults to `Schaka/AudioMuse-AI:main`. `AUDIOMUSE_CONTEXT` takes any Docker
-build context — a git URL with a `#ref` fragment, or a local path (resolved from
-`local-test/`) to iterate without pushing:
-
-```bash
-AUDIOMUSE_CONTEXT=../../AudioMuse-AI docker compose $COMPOSE --profile core build audiomuse-ai-core
-```
-
-### Testing a profile without the hardware
-
-`register()` decides everything from the arch string and the available provider
-list. Stub both, pass a recording `ctx`, and read off what would be registered —
-see [docs/ARCH_PROFILES.md](docs/ARCH_PROFILES.md#testing-without-the-hardware).
+Building the image or plugin from source, running the test suite, iterating
+against a working tree or an unreleased core: see
+[DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Releases
 
@@ -183,21 +154,6 @@ assets, so no workflow can retrigger itself.
 The image workflows poll because a push in a repository we do not own cannot
 trigger a workflow here. Both keep their "last built against" marker in the
 Actions cache, keyed on the upstream digest or version.
-
-### Cutting a plugin release
-
-CI stamps the version into the manifest, so nothing needs bumping by hand —
-only `min_core_version` in `plugin/rocm_accelerator/plugin.json` is authored. The
-annotated tag's message becomes the changelog shown in the Plugins UI:
-
-```bash
-git tag -a v0.1.0 -m "First release: MIGraphX provider for musicnn + faster-whisper ASR."
-git push origin v0.1.0
-```
-
-Published versions are immutable: never move a tag, cut a new version. The
-release workflow rebuilds the version list from every past release, so older
-versions stay installable and rollback keeps working.
 
 ## Base images
 

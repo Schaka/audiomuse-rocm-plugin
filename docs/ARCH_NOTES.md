@@ -46,15 +46,16 @@ Fixed on MIGraphX `develop`, which the ROCm 7 bases build against — absent or
 `stretch` is accepted there, other policies throw with a clearer message. So
 CLAP compiles fine on gfx1030+ / gfx9xx and this is gfx803-only.
 
+Patched in base image before compiling MIGraphX.
+
 ### MIGraphX and the ROCM EP must never share a session
 
 Putting both in CLAP's session was tried and **SIGSEGVs the whole worker
 process** (exit 139), not a catchable ORT exception. MIGraphX does real GPU work
 on the part of the graph it can compile before reaching the unsupported Resize
-node; handing that node to `ROCMExecutionProvider` inside the same session
+node (now fixed in base image); handing that node to `ROCMExecutionProvider` inside the same session
 faults with `hip_global.cpp: Module not initialized`, consistent with a
-corrupted HIP module table. The same fault follows any
-MIGraphX-session-then-ROCM-session sequence in one process.
+corrupted HIP module table. 
 
 So on gfx803 CLAP gets `[ROCMExecutionProvider, CPUExecutionProvider]` in its
 own session and MIGraphX is not offered for it at all. Nothing is lost: it could
@@ -66,11 +67,6 @@ basis:
 - [microsoft/onnxruntime#14679](https://github.com/microsoft/onnxruntime/issues/14679)
   — MIGraphX + ROCM in one session producing corrupted output vs. either alone;
   still open.
-- [immich-app/immich#27387](https://github.com/immich-app/immich/issues/27387)
-  (fixed by [#28444](https://github.com/immich-app/immich/pull/28444)) — a
-  MIGraphX-*alone* SIGSEGV from concurrent compiles, fixed by serializing them.
-  Different mechanism, but the same theme: MIGraphX's in-process state is
-  fragile under multi-session use.
 
 ### musicnn must never use the ROCM EP
 

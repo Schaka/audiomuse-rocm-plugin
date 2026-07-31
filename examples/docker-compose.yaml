@@ -1,7 +1,7 @@
 # AudioMuse-AI on an AMD GPU - complete, ready to run.
 #
-#   1. Pick your GPU's tag:  rocminfo | grep gfx     (see ../README.md)
-#      Set it below, or export ROCM_ARCH=gfx1030 before `docker compose up -d`.
+#   1. Find your GPU's tag:  rocminfo | grep gfx     (see ../README.md)
+#      Replace "gfx1201" below in x-rocm-image with your tag.
 #   2. Fill in your media server under audiomuse-ai-flask.
 #   3. docker compose up -d
 #   4. http://localhost:8000 -> Plugins -> Repositories, add:
@@ -13,7 +13,7 @@
 # analysis runs.
 
 x-rocm-image: &rocm-image
-  image: ghcr.io/schaka/audiomuse-ai-rocm:latest-${ROCM_ARCH:-gfx1201}
+  image: ghcr.io/schaka/audiomuse-ai-rocm:latest-gfx1201  # <- your arch here
 
 x-db-env: &db-env
   POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
