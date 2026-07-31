@@ -240,7 +240,6 @@ RUN set -eux; \
 RUN set -eux; \
     n=0; \
     until [ "$n" -ge 3 ]; do \
-        rm -rf /build/build; \
         cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
         if cmake --build /build/build -j"$(nproc)" --target whisper-cli; then \
             break; \
@@ -260,7 +259,6 @@ RUN set -eux; \
 RUN set -eux; \
     n=0; \
     until [ "$n" -ge 3 ]; do \
-        rm -rf /build/build; \
         cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
         if cmake --build /build/build -j"$(nproc)" --target parakeet-cli; then \
             break; \
