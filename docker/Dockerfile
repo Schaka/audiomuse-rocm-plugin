@@ -15,7 +15,7 @@
 
 # Defaults are for a local one-off build only; CI always passes both explicitly
 # (BASE_IMAGE per arch, CORE_IMAGE pinned to an upstream digest or version).
-ARG BASE_IMAGE=ghcr.io/schaka/rocm-migraphx-ort-torch-builder:latest-gfx1201
+ARG BASE_IMAGE=ghcr.io/schaka/rocm-migraphx-ort-torch-builder:rocm7.14-gfx1201
 ARG CORE_IMAGE=ghcr.io/neptunehub/audiomuse-ai:latest
 
 # Which CTranslate2 to use - see the ct2-* stages below. "prebuilt" takes

@@ -30,7 +30,7 @@ One tag per arch — several arches' ROCm kernels do not fit in one image.
 | `latest-gfx1201`, `-gfx1200` | RDNA4 (RX 9070 …) |
 | `latest-gfx1100`, `-gfx1101`, `-gfx1102`, `-gfx1103` | RDNA3 (RX 7000, RDNA3 APUs) |
 | `latest-gfx1150`, `-gfx1151`, `-gfx1152`, `-gfx1153` | Phoenix / Strix / Strix Halo APUs |
-| `latest-gfx1030`, `-gfx1031`, `-gfx1032`, `-gfx1033`, `-gfx1034`, `-gfx1035`, `-gfx1036` | RDNA2 (RX 6000, RDNA2 APUs) |
+| `latest-gfx1030`, `-gfx1031`, `-gfx1032`, `-gfx1034`, `-gfx1035`, `-gfx1036` | RDNA2 (RX 6000, RDNA2 APUs) — not `gfx1033` (Steam Deck): no `rocm7.14-gfx1033` base image upstream |
 | `latest-gfx1010`, `-gfx1011`, `-gfx1012` | RDNA1 (RX 5000) |
 | `latest-gfx900`, `-gfx90c`, `-gfx906`, `-gfx908`, `-gfx90a`, `-gfx942`, `-gfx950` | Vega / CDNA |
 | `latest-gfx803` | Polaris (RX 460–590) — experimental, see [docs/ARCH_NOTES.md](docs/ARCH_NOTES.md) |
@@ -159,6 +159,9 @@ Actions cache, keyed on the upstream digest or version.
 
 The ROCm bases come from
 [Schaka/rocm-migraphx-ort-builder](https://github.com/Schaka/rocm-migraphx-ort-builder):
-`rocm-migraphx-ort-torch-builder:latest-<arch>`, one tag per arch. The
+`rocm-migraphx-ort-torch-builder:rocm7.14-<arch>`, one tag per arch. The
 `latest-gfx803` tag lives in the same package but is built from a ROCm 6.4.4
-base by a separate workflow there, since ROCm 7 dropped Polaris support.
+base by a separate workflow there, since ROCm 7 dropped Polaris support — it
+never got a `rocm7.14-gfx803` tag, so this repo's workflow still pulls
+`6.4.4-gfx803` for that one arch. `gfx1033` (Steam Deck) also has no
+`rocm7.14-gfx1033` base image, so it is dropped from the build matrix here.

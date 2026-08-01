@@ -47,7 +47,8 @@ jobs:
           - gfx1030
           - gfx1031
           - gfx1032
-          - gfx1033
+          # gfx1033 (Steam Deck) excluded: rocm-migraphx-ort-builder does not
+          # publish a rocm7.14-gfx1033 base image.
           - gfx1034
           - gfx1035
           - gfx1036
@@ -94,7 +95,12 @@ jobs:
           arch="${{ matrix.arch }}"
           version="${{ inputs.version }}"
 
-          base="${owner}/rocm-migraphx-ort-torch-builder:latest-${arch}"
+          if [ "$arch" = "gfx803" ]; then
+            # Stuck on ROCm 6.4.4 upstream, still under the old "latest" tag.
+            base="${owner}/rocm-migraphx-ort-torch-builder:rocm6.4.4-${arch}"
+          else
+            base="${owner}/rocm-migraphx-ort-torch-builder:rocm7.14-${arch}"
+          fi
           echo "base=${base}" >> "$GITHUB_OUTPUT"
 
           # CTranslate2 comes in three flavours, because upstream's prebuilt
