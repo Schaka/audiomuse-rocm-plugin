@@ -6,9 +6,9 @@ provider, and lyrics transcription on faster-whisper.
 
 **Two pieces, and you need both:**
 
-| | What | Why |
-| --- | --- | --- |
-| **Worker image** | `ghcr.io/schaka/audiomuse-ai-rocm:latest-<arch>` | AudioMuse-AI's published image rebuilt on a ROCm base, with a MIGraphX-enabled onnxruntime and CTranslate2's ROCm build |
+| | What                                                      | Why |
+| --- |-----------------------------------------------------------| --- |
+| **Worker image** | `ghcr.io/schaka/audiomuse-ai-rocm:7.14-<arch>`            | AudioMuse-AI's published image rebuilt on a ROCm base, with a MIGraphX-enabled onnxruntime and CTranslate2's ROCm build |
 | **Plugin** | `ROCm Accelerator (AMD)`, installed from the Plugins page | Wires those into the analysis pipeline |
 
 A plugin cannot install a ROCm stack (a PyPI `onnxruntime` would replace the
@@ -35,9 +35,11 @@ One tag per arch — several arches' ROCm kernels do not fit in one image.
 | `latest-gfx900`, `-gfx90c`, `-gfx906`, `-gfx908`, `-gfx90a`, `-gfx942`, `-gfx950` | Vega / CDNA |
 | `latest-gfx803` | Polaris (RX 460–590) — experimental, see [docs/ARCH_NOTES.md](docs/ARCH_NOTES.md) |
 
-Also published: `:<version>-<arch>` pinned to an upstream release, and
-`:unstable-<arch>` / `:unstable-<YYYYMMDD>-<arch>` built nightly against
-upstream's `:devel`.
+Also published: `:<version>-<arch>` pinned to an upstream AudioMuse-AI
+release (e.g. `:3.1.0-gfx1030`), for locking your worker to a specific
+upstream version instead of tracking `latest`. Unrelated to the plugin's own
+version — the plugin never ships inside this image. `:unstable-<arch>` /
+`:unstable-<YYYYMMDD>-<arch>` are built nightly against upstream's `:devel`.
 
 ## 2. Wire it into your compose file
 
