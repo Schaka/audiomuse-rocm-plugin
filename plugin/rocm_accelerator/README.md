@@ -1,4 +1,4 @@
-# ROCm Accelerator (AMD)
+# AMD GPU Hardware Acceleration
 
 Runs AudioMuse-AI's analysis models on an AMD GPU. Install it on the
 [ROCm worker image](https://github.com/Schaka/audiomuse-rocm-plugin); on any
