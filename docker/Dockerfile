@@ -239,7 +239,7 @@ RUN set -eux; \
     sed -i '/Error executing command for/a\        std::exit(1);' "$vk_gen"
 RUN set -eux; \
     n=0; \
-    until [ "$n" -ge 3 ]; do \
+    until [ "$n" -ge 10 ]; do \
         cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
         if cmake --build /build/build -j"$(nproc)" --target whisper-cli; then \
             break; \
@@ -258,7 +258,7 @@ RUN set -eux; \
     sed -i '/Error executing command for/a\        std::exit(1);' "$vk_gen"
 RUN set -eux; \
     n=0; \
-    until [ "$n" -ge 3 ]; do \
+    until [ "$n" -ge 10 ]; do \
         cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
         if cmake --build /build/build -j"$(nproc)" --target parakeet-cli; then \
             break; \
