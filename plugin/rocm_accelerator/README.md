@@ -74,8 +74,22 @@ precision — one shared directory would serve an fp32 artifact as a cache hit
 after fp16 was switched on. Both sets stay valid, so flipping the setting back
 costs no recompile.
 
-Mount it as a volume to keep compilation results across restarts. The image's
-entrypoint clears it by itself when the image's MIGraphX build changes.
+Mount it as a volume to keep compilation results across restarts. The image
+never clears this cache itself — given how long a recompile can take, a
+still-valid cache is worth more than the disk space, so nothing here ever
+deletes it on your behalf.
+
+The entrypoint does check whether the image's MIGraphX build has changed
+since the cache was last used (e.g. a base image rebuilt against a different
+MIGraphX version), and logs a warning if so — a cache built against a
+different MIGraphX build can, in rare cases, cause it to recompile the same
+graph forever instead of using it. The warning is informational only, nothing
+is deleted automatically. If you see it **and** also notice analysis stuck
+recompiling the same model repeatedly (log stuck between `Model Compile:
+Begin`/`Model Compile: End` far longer than your last known-good run), clear
+`/app/.cache/migraphx` and `/app/.cache/miopen` yourself. If analysis is
+proceeding normally, ignore the warning — the existing cache is still doing
+its job.
 
 ## Requirements
 
