@@ -91,6 +91,45 @@ Begin`/`Model Compile: End` far longer than your last known-good run), clear
 proceeding normally, ignore the warning — the existing cache is still doing
 its job.
 
+### Speeding up the compile
+
+MIGraphX compiles GPU kernels on the CPU, in parallel, controlled by
+`MIGRAPHX_GPU_COMPILE_PARALLEL` (a MIGraphX variable, not set by the image —
+add it yourself). It defaults to your core count, but that default doesn't
+always resolve correctly in a container, so it can end up compiling on far
+fewer threads than you have available. Setting it explicitly to your core
+count on the worker can noticeably cut compile time:
+
+```yaml
+environment:
+  MIGRAPHX_GPU_COMPILE_PARALLEL: "8"  # your worker's core count
+```
+
+### Avoiding avoidable recompiles
+
+AudioMuse-AI's own `PER_SONG_MODEL_RELOAD` (default `true`) tears down and
+rebuilds the musicnn ONNX sessions after every track. Each rebuild goes
+through MIGraphX again — a cache hit is fast (well under a second), but
+that's still session-construction overhead paid every track for no reason
+once the cache is warm. Setting it to `false` on the worker keeps sessions
+loaded across 20 tracks instead of 1 (CLAP already only recycles at album
+end either way):
+
+```yaml
+environment:
+  PER_SONG_MODEL_RELOAD: "false"
+```
+
+Trade-off, per core's own comment in `config.py`: `true` is safest for VRAM
+(stable usage, no leak potential) at ~2-3s reload overhead per song; `false`
+is faster but may see gradual VRAM growth on some systems. Worth trying
+`false` first — revert if you see VRAM creeping up over a long library scan.
+
+This only speeds up the CPU side of compilation — some of the compile work
+still runs on the GPU regardless, so this won't make the GPU portion faster.
+It will also peg every thread you give it at 100% CPU for the duration of the
+compile, so don't set it above what you can spare on a shared host.
+
 ## Requirements
 
 `requirements` in `plugin.json` is deliberately empty. A PyPI `onnxruntime`

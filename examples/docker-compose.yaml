@@ -98,6 +98,10 @@ services:
       USE_GPU_CLUSTERING: "false"
       # Uncomment to pin to one GPU in a multi-GPU host (index or UUID):
       # HIP_VISIBLE_DEVICES: "0"
+      # Uncomment to speed up the first MIGraphX compile (see plugin README
+      # "Speeding up the compile") - pegs that many CPU threads at 100% for
+      # the duration of the compile:
+      # MIGRAPHX_GPU_COMPILE_PARALLEL: "8"
     devices: # <-- NEW: pass the GPU into the container
       - /dev/kfd
       - /dev/dri
