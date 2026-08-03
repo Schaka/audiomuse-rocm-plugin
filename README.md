@@ -77,9 +77,10 @@ for why it's split into `fp16`/`fp32` subdirectories internally.
 
 A complete stack — Postgres, Redis, both services, GPU passthrough, group ids,
 cache volumes — is at
-[`examples/docker-compose.yaml`](examples/docker-compose.yaml). Copy it,
-replace the arch in `x-rocm-image`, fill in your media server, `docker compose
-up -d`.
+[`examples/docker-compose.yaml`](examples/docker-compose.yaml), written as a
+direct diff against upstream's own compose file so it's clear exactly what
+changed. Copy it, replace the arch in both `image:` lines, fill in your media
+server, `docker compose up -d`.
 
 ## 3. Configure the plugin
 
@@ -91,21 +92,20 @@ JSON editor for the whole settings object.
 
 ## 4. Get the plugin
 
-Two routes. Either works; they publish the same plugin id, so **add one, not
-both** — an unstable build sorts above the stable release it was built from.
+Two routes, publishing the same plugin id — **use one, not both** (an
+unstable build sorts above the stable release it was built from).
 
-### Community catalog (once submitted)
+### Community catalog (recommended)
 
-AudioMuse-AI ships the
-[community catalog](https://github.com/NeptuneHub/AudioMuse-AI-plugins) as a
-repository out of the box, so the plugin appears there with nothing to add.
-Stable releases only.
-
-> Not submitted yet. Until it is, use the repository below.
+Listed in the
+[community catalog](https://github.com/NeptuneHub/AudioMuse-AI-plugins), which
+AudioMuse-AI ships as a repository out of the box — nothing to add, install
+**AMD GPU Hardware Acceleration** straight from the Catalog tab. Stable
+releases only.
 
 ### This repository's own catalog
 
-Gives you the unstable channel as well, which the community catalog does not
+Only needed for the unstable channel, which the community catalog does not
 carry. Published as GitHub release assets — there is no server behind it.
 
 ```

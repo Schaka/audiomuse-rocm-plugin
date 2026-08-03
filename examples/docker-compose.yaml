@@ -1,105 +1,136 @@
-# AudioMuse-AI on an AMD GPU - complete, ready to run.
+# AudioMuse-AI on an AMD GPU.
 #
+# Start from upstream's docker-compose.yaml:
+#   https://github.com/NeptuneHub/AudioMuse-AI/blob/main/deployment/docker-compose.yaml
+# This file is that same stack with the changes from README.md step 2 applied.
+# Diff the two side by side; everything below marked "<-- CHANGED" or
+# "<-- NEW" is the only thing that differs from upstream.
+#
+# What to do:
 #   1. Find your GPU's tag:  rocminfo | grep gfx     (see ../README.md)
-#      Replace "gfx1201" below in x-rocm-image with your tag.
-#   2. Fill in your media server under audiomuse-ai-flask.
+#      Replace "gfx1201" in the worker's image below with your tag.
+#   2. Fill in your media server under audiomuse-ai-flask (see upstream's
+#      docker-compose.yaml or its README for the env vars it needs).
 #   3. docker compose up -d
-#   4. http://localhost:8000 -> Plugins -> Repositories, add:
-#      https://github.com/Schaka/audiomuse-rocm-plugin/releases/latest/download/repository.json
-#      then Catalog -> install "ROCm Accelerator (AMD)" -> apply the restart.
+#   4. http://localhost:8000 -> Plugins -> Catalog -> install
+#      "AMD GPU Hardware Acceleration" (community catalog, no repo add needed)
+#      -> apply the restart. Unstable channel instead: see ../README.md step 4.
 #
-# Flask and worker run the same image; only SERVICE_TYPE and the GPU
-# passthrough differ. The GPU is only useful on the worker - that is where
-# analysis runs.
-
-x-rocm-image: &rocm-image
-  image: ghcr.io/schaka/audiomuse-ai-rocm:latest-gfx1201  # <- your arch here
-
-x-db-env: &db-env
-  POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
-  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
-  POSTGRES_DB: audiomusedb
-  POSTGRES_HOST: postgres
-  POSTGRES_PORT: "5432"
-  REDIS_URL: redis://redis:6379/0
-  TEMP_DIR: /app/temp_audio
-  TZ: ${TZ:-UTC}
+# Only the worker's image changes. GPU passthrough only helps the container
+# doing analysis; flask stays on upstream's image, unmodified.
 
 services:
+  # Redis service for RQ (task queue) - unchanged from upstream.
   redis:
     image: redis:7-alpine
+    container_name: audiomuse-redis
+    environment:
+      TZ: "${TZ:-UTC}"
+    ports:
+      - "${REDIS_PORT:-6379}:6379" # Expose Redis port to the host
     volumes:
-      - redis-data:/data
+      - redis-data:/data # Persistent storage for Redis data
     restart: unless-stopped
 
+  # PostgreSQL database service - unchanged from upstream.
   postgres:
     image: postgres:15-alpine
+    container_name: audiomuse-postgres
     environment:
-      <<: *db-env
+      TZ: "${TZ:-UTC}"
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432" # Expose PostgreSQL port to the host
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data # Persistent storage for PostgreSQL data
     restart: unless-stopped
 
+  # AudioMuse-AI Flask application service - unchanged from upstream.
   audiomuse-ai-flask:
-    <<: *rocm-image
+    image: ghcr.io/neptunehub/audiomuse-ai:latest
+    container_name: audiomuse-ai-flask-app
     ports:
-      - "8000:8000"
+      - "${FRONTEND_PORT:-8000}:8000" # Map host port 8000 to container port 8000
     environment:
-      <<: *db-env
-      SERVICE_TYPE: flask
-      # --- your media server ---
+      SERVICE_TYPE: "flask" # Tells the container to run the Flask app
+      TZ: "${TZ:-UTC}"
+      # DATABASE_URL is now constructed by config.py from the following:
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres" # Service name of the postgres container
+      POSTGRES_PORT: "5432" # Internal port - always 5432 inside the Docker network
+      REDIS_URL: "redis://redis:6379/0" # Connects to the 'redis' service
+      TEMP_DIR: "/app/temp_audio"
+      # --- your media server (see upstream compose/README for the full list) ---
       MEDIASERVER_TYPE: jellyfin
       JELLYFIN_URL: http://jellyfin:8096
       JELLYFIN_USER_ID: ""
       JELLYFIN_TOKEN: ""
     volumes:
-      - temp-audio-flask:/app/temp_audio
-      # Installed plugin code. Both containers need it, each with its own copy.
-      - plugins-flask:/app/plugin/installed
+      - temp-audio-flask:/app/temp_audio # Volume for temporary audio files
+      - plugins-flask:/app/plugin/installed # This container's own plugins cache (code + pip deps)
     depends_on:
       - redis
       - postgres
     restart: unless-stopped
 
+  # AudioMuse-AI RQ Worker service - GPU passthrough happens here; this is
+  # the container that actually runs analysis.
   audiomuse-ai-worker:
-    <<: *rocm-image
+    image: ghcr.io/schaka/audiomuse-ai-rocm:latest-gfx1201 # <-- CHANGED: was ghcr.io/neptunehub/audiomuse-ai:latest
+    container_name: audiomuse-ai-worker-instance
     environment:
-      <<: *db-env
-      SERVICE_TYPE: worker
-      # The clustering library has no ROCm port, so clustering stays on CPU.
-      # ONNX analysis still uses the GPU.
+      SERVICE_TYPE: "worker" # Tells the container to run the RQ worker
+      TZ: "${TZ:-UTC}"
+      # DATABASE_URL is now constructed by config.py from the following:
+      POSTGRES_USER: ${POSTGRES_USER:-audiomuse}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-audiomusepassword}
+      POSTGRES_DB: "audiomusedb"
+      POSTGRES_HOST: "postgres" # Service name of the postgres container
+      POSTGRES_PORT: "5432" # Internal port - always 5432 inside the Docker network
+      REDIS_URL: "redis://redis:6379/0" # Connects to the 'redis' service
+      TEMP_DIR: "/app/temp_audio"
+      # <-- NEW: the clustering library has no ROCm port, so clustering stays
+      # on CPU. ONNX analysis (musicnn, CLAP, faster-whisper) still uses the GPU.
       USE_GPU_CLUSTERING: "false"
       # Uncomment to pin to one GPU in a multi-GPU host (index or UUID):
       # HIP_VISIBLE_DEVICES: "0"
-    devices:
+    devices: # <-- NEW: pass the GPU into the container
       - /dev/kfd
       - /dev/dri
-    # The image has no `render`/`video` group, so pass the host's numeric GIDs.
-    # Yours: getent group render video
+    # <-- NEW: the image ships no render/video group, so pass the host's
+    # numeric GIDs instead. Find yours with: getent group render video
     group_add:
       - "${RENDER_GID:-105}"
       - "${VIDEO_GID:-39}"
-    security_opt:
+    security_opt: # <-- NEW: required for ROCm GPU access in the container
       - seccomp:unconfined
-    ipc: host
+    ipc: host # <-- NEW: required for ROCm GPU access in the container
     volumes:
-      - temp-audio-worker:/app/temp_audio
-      - plugins-worker:/app/plugin/installed
-      # GPU kernel and compiled-model caches. Without these every restart
-      # recompiles them, which costs minutes on the first analysis.
-      - miopen-cache:/app/.cache/miopen
+      - temp-audio-worker:/app/temp_audio # Volume for temporary audio files
+      - plugins-worker:/app/plugin/installed # This container's own plugins cache (code + pip deps)
+      # <-- NEW: MIGraphX's and MIOpen's compiled-kernel caches. Without
+      # these every restart recompiles them, which costs minutes before the
+      # first analysis can start.
       - migraphx-cache:/app/.cache/migraphx
+      - miopen-cache:/app/.cache/miopen
     depends_on:
       - redis
       - postgres
     restart: unless-stopped
 
+# Define volumes for persistent data and temporary files
 volumes:
   redis-data:
   postgres-data:
-  temp-audio-flask:
-  temp-audio-worker:
+  temp-audio-flask: # Volume for Flask app's temporary audio
+  temp-audio-worker: # Volume for Worker's temporary audio
+  # Installed plugins live here (not in the database). Flask and worker each keep
+  # their own copy and install into it, so plugins are reused across restarts.
   plugins-flask:
   plugins-worker:
-  miopen-cache:
-  migraphx-cache:
+  migraphx-cache: # <-- NEW: worker's compiled MIGraphX graphs
+  miopen-cache: # <-- NEW: worker's compiled MIOpen kernels
