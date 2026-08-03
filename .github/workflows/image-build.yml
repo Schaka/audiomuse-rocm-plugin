@@ -68,7 +68,8 @@ jobs:
     steps:
       # The ROCm base and the core image are both large; the runner's stock
       # ~14GB of free disk is not enough to pull both and write the result.
-      - uses: jlumbroso/free-disk-space@v1.3.1
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
           android: true
@@ -77,6 +78,11 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: false
+
+      - name: Set swap space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 16
 
       - uses: actions/checkout@v4
 

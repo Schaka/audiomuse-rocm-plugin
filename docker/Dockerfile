@@ -206,6 +206,15 @@ RUN set -eux; \
         git cmake build-essential ca-certificates \
         libvulkan-dev vulkan-tools glslang-tools mesa-vulkan-drivers glslc spirv-headers; \
     rm -rf /var/lib/apt/lists/*
+# CTranslate2, whisper.cpp and parakeet.cpp all compile in one job on the same
+# CI runner; left to BuildKit's default parallelism, the independent stages
+# below build concurrently and stack their peak memory/CPU use, which is what
+# has been driving the OOM/segfault/fork-failure flakiness during whisper.cpp
+# and parakeet.cpp's shader-gen and link steps. This COPY has no functional
+# purpose beyond creating a BuildKit dependency edge on the ct2 stage, forcing
+# it to finish first; the copied files are discarded immediately after.
+COPY --from=ct2 /ct2-out /tmp/ct2-sequencer
+RUN rm -rf /tmp/ct2-sequencer
 
 # BUILD_SHARED_LIBS=OFF: statically links ggml/whisper/parakeet into the CLI
 # binary itself, so only that one file needs copying into the runner stage -
@@ -241,16 +250,21 @@ RUN set -eux; \
     n=0; \
     until [ "$n" -ge 10 ]; do \
         cmake -S /build -B /build/build -DGGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
-        if cmake --build /build/build -j"$(nproc)" --target whisper-cli; then \
+        if cmake --build /build/build -j1 --target whisper-cli; then \
             break; \
         fi; \
         n=$((n+1)); \
-        echo "whisper.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying"; \
+        echo "whisper.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying in 60s"; \
+        sleep 60; \
     done; \
     test -x /build/build/bin/whisper-cli
 
 FROM ggml-vulkan-deps AS parakeet-cpp-vulkan
 ARG PARAKEET_CPP_REF
+# Sequencer only (see ggml-vulkan-deps above): forces this stage to build
+# after whisper-cpp-vulkan instead of in parallel with it.
+COPY --from=whisper-cpp-vulkan /build/build/bin/whisper-cli /tmp/whisper-vulkan-sequencer
+RUN rm -f /tmp/whisper-vulkan-sequencer
 RUN set -eux; \
     git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build; \
     vk_gen="$(find /build -path '*ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp' -print -quit)"; \
@@ -260,11 +274,12 @@ RUN set -eux; \
     n=0; \
     until [ "$n" -ge 10 ]; do \
         cmake -S /build -B /build/build -DPARAKEET_GGML_VULKAN=1 -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON; \
-        if cmake --build /build/build -j"$(nproc)" --target parakeet-cli; then \
+        if cmake --build /build/build -j1 --target parakeet-cli; then \
             break; \
         fi; \
         n=$((n+1)); \
-        echo "parakeet.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying"; \
+        echo "parakeet.cpp vulkan build attempt $n failed (likely shader-gen fork flakiness) - retrying in 60s"; \
+        sleep 60; \
     done; \
     test -x /build/build/examples/cli/parakeet-cli
 
@@ -272,6 +287,10 @@ FROM ${BASE_IMAGE} AS whisper-cpp-hip
 ARG ROCM_ARCH
 ARG WHISPER_CPP_REF
 SHELL ["/bin/bash", "-c"]
+# Sequencer only (see ggml-vulkan-deps above): forces this stage to build
+# after parakeet-cpp-vulkan instead of in parallel with it.
+COPY --from=parakeet-cpp-vulkan /build/build/examples/cli/parakeet-cli /tmp/parakeet-vulkan-sequencer
+RUN rm -f /tmp/parakeet-vulkan-sequencer
 # hipblas-dev/rocblas-dev: needed by name on gfx803's ROCm 6.4 base; gfx900+'s
 # ROCm 7.14 base already carries its own BLAS dev headers under a different
 # package name (amdrocm-blas-dev7.14 etc.), so this is a no-op there - hence
@@ -285,12 +304,16 @@ RUN set -eux; \
     git clone --depth 1 --branch "${WHISPER_CPP_REF}" https://github.com/ggml-org/whisper.cpp /build; \
     cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DGGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
-    cmake --build /build/build -j"$(nproc)" --target whisper-cli
+    cmake --build /build/build -j1 --target whisper-cli
 
 FROM ${BASE_IMAGE} AS parakeet-cpp-hip
 ARG ROCM_ARCH
 ARG PARAKEET_CPP_REF
 SHELL ["/bin/bash", "-c"]
+# Sequencer only (see ggml-vulkan-deps above): forces this stage to build
+# after whisper-cpp-hip instead of in parallel with it.
+COPY --from=whisper-cpp-hip /build/build/bin/whisper-cli /tmp/whisper-hip-sequencer
+RUN rm -f /tmp/whisper-hip-sequencer
 RUN set -eux; \
     case "${ROCM_ARCH}" in \
         gfx803|gfx802|gfx805) \
@@ -307,7 +330,7 @@ RUN set -eux; \
             git clone --recursive --depth 1 --branch "${PARAKEET_CPP_REF}" https://github.com/mudler/parakeet.cpp /build; \
             cmake -S /build -B /build/build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                 -DPARAKEET_GGML_HIP=1 -DAMDGPU_TARGETS="${ROCM_ARCH}"; \
-            cmake --build /build/build -j"$(nproc)" --target parakeet-cli; \
+            cmake --build /build/build -j1 --target parakeet-cli; \
             ;; \
     esac
 
