@@ -68,12 +68,33 @@ cache volume. Nothing else in your existing stack needs to move.
       - miopen-cache:/app/.cache/miopen
 ```
 
-The two cache volumes hold MIGraphX's and MIOpen's compiled-kernel caches.
-Without them, every container restart recompiles the ONNX graphs and GPU
-kernels from scratch, which costs minutes before the first analysis can start;
-with the volume mounted, a restart reuses what was already compiled. See
+The two cache volumes hold MIGraphX's and MIOpen's compiled-kernel caches. See
 [MIGraphX cache details](plugin/rocm_accelerator/README.md#compiled-model-cache)
 for why it's split into `fp16`/`fp32` subdirectories internally.
+
+> [!IMPORTANT]
+> **The first analysis is slow — this is expected, not a hang or a crash.**
+> MIGraphX has to compile musicnn/CLAP for your GPU's arch before it can run
+> them. That compile can take anywhere from several minutes to **over an
+> hour**, during which the log repeats `WARN`/error-looking lines between
+> `Model Compile: Begin` and `Model Compile: End` — those are normal compiler
+> chatter, not failures. Let it run; once `Model Compile: End` shows up,
+> inference is fast for the rest of your library. `fp16_enable` is a knob you
+> can try either way — whether fp16 or fp32 compiles faster or infers faster
+> is not a fixed rule, it depends on arch and model (MIGraphX has open
+> upstream issues where fp16 ends up *slower* than fp32:
+> [#763](https://github.com/ROCm/AMDMIGraphX/issues/763),
+> [#4170](https://github.com/ROCm/AMDMIGraphX/issues/4170)). Check
+> [ARCH_NOTES.md](docs/ARCH_NOTES.md) for what's actually been measured on
+> your GPU generation before assuming either direction.
+>
+> Recompiles happen again whenever MIGraphX sees a graph shape it hasn't
+> cached yet — inputs are fixed-size per model, so this isn't per-track, but
+> it can happen after toggling `fp16_enable`, or on a fresh container without
+> the cache volumes mounted (a restart with no volume wipes everything and
+> forces every model to compile from scratch again). Mounting
+> `migraphx-cache`/`miopen-cache` as shown above is what makes that a one-time
+> cost instead of a recurring one.
 
 A complete stack — Postgres, Redis, both services, GPU passthrough, group ids,
 cache volumes — is at
