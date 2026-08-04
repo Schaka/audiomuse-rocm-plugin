@@ -27,13 +27,13 @@ One tag per arch — several arches' ROCm kernels do not fit in one image.
 
 | Tag | GPUs |
 | --- | --- |
-| `latest-gfx1201`, `-gfx1200` | RDNA4 (RX 9070 …) |
+| `latest-gfx1201`, `-gfx1200` | RDNA4 (RX 9070 …) — `gfx1201` validated on RX 9070 XT |
 | `latest-gfx1100`, `-gfx1101`, `-gfx1102`, `-gfx1103` | RDNA3 (RX 7000, RDNA3 APUs) |
 | `latest-gfx1150`, `-gfx1151`, `-gfx1152`, `-gfx1153` | Phoenix / Strix / Strix Halo APUs |
-| `latest-gfx1030`, `-gfx1031`, `-gfx1032`, `-gfx1034`, `-gfx1035`, `-gfx1036` | RDNA2 (RX 6000, RDNA2 APUs) — not `gfx1033` (Steam Deck): no `rocm7.14-gfx1033` base image upstream |
+| `latest-gfx1030`, `-gfx1031`, `-gfx1032`, `-gfx1034`, `-gfx1035`, `-gfx1036` | RDNA2 (RX 6000, RDNA2 APUs) — not `gfx1033` (Steam Deck): no `rocm7.14-gfx1033` base image upstream. `gfx1031` validated on Sapphire GPRO X080 (RX 6700 equivalent) |
 | `latest-gfx1010`, `-gfx1011`, `-gfx1012` | RDNA1 (RX 5000) |
 | `latest-gfx900`, `-gfx90c`, `-gfx906`, `-gfx908`, `-gfx90a`, `-gfx942`, `-gfx950` | Vega / CDNA |
-| `latest-gfx803` | Polaris (RX 460–590) — experimental, see [docs/ARCH_NOTES.md](docs/ARCH_NOTES.md) |
+| `latest-gfx803` | Polaris (RX 460–590) — experimental, see [docs/ARCH_NOTES.md](docs/ARCH_NOTES.md). `gfx806` (RX 470 8GB UEFI Mining) also validated, runs under this tag |
 
 Also published: `:<version>-<arch>` pinned to an upstream AudioMuse-AI
 release (e.g. `:3.1.0-gfx1030`), for locking your worker to a specific
