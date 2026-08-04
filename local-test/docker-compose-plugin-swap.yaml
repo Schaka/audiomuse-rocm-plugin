@@ -129,6 +129,11 @@ services:
       - "${VIDEO_GID:-39}"
     security_opt:
       - seccomp:unconfined
+      # SELinux-enforcing hosts only (Fedora, RHEL, CentOS): the stock
+      # container policy has no rule to mmap /dev/kfd (hsa_device_t), which
+      # aborts the worker mid-compile with "Memory in use". See the comment in
+      # examples/docker-compose.yaml for the full story. No-op elsewhere.
+      - label=disable
     ipc: host
     cap_add:
       - SYS_PTRACE

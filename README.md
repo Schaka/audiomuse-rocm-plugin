@@ -62,11 +62,39 @@ cache volume. Nothing else in your existing stack needs to move.
       - "39"
     security_opt:
       - seccomp:unconfined
+      - label=disable   # SELinux hosts (Fedora/RHEL/CentOS) - see below
     ipc: host
     volumes:
       - migraphx-cache:/app/.cache/migraphx
       - miopen-cache:/app/.cache/miopen
 ```
+
+> [!IMPORTANT]
+> **On an SELinux-enforcing host (Fedora, RHEL, CentOS) `label=disable` is not
+> optional.** `/dev/kfd` is labelled `hsa_device_t`, and the stock container
+> policy has no rule permitting a container to `mmap` it — the
+> `container_use_dri_devices` rule that covers `/dev/dri` does not extend to
+> it. Open and ioctl *are* permitted, so the GPU is detected and models begin
+> compiling; only libhsakmt's HDP-flush MMIO page fails to map, and the worker
+> then dies mid-compile with `SIGABRT` (exit 134):
+>
+> ```
+> Failed to map remapped mmio page on gpu_mem 0
+> Memory critical error by agent node-0 (Agent handle: 0x…) on address 0x…. Reason: Memory in use.
+> ```
+>
+> Every album then fails and retries forever. If you would rather keep the
+> container SELinux-confined, the narrower fix is to leave `label=disable` out
+> and have an administrator enable the `container_use_devices` boolean instead,
+> which grants containers device-node access system-wide. On hosts where
+> SELinux is not enforcing, `label=disable` changes nothing.
+>
+> **podman-compose users:** do not rely on `ipc: host` to cover this.
+> podman-compose (1.6.0 and earlier) does not implement the compose `ipc:` key
+> at all — it is parsed and silently dropped, so the container gets podman's
+> default. It happens to mask the SELinux problem when it *is* applied, because
+> sharing a host namespace makes podman drop label separation as a side effect;
+> that is a coincidence, not the mechanism. `security_opt` is honoured.
 
 The two cache volumes hold MIGraphX's and MIOpen's compiled-kernel caches. See
 [MIGraphX cache details](plugin/rocm_accelerator/README.md#compiled-model-cache)

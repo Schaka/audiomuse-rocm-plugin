@@ -112,6 +112,20 @@ services:
       - "${VIDEO_GID:-39}"
     security_opt: # <-- NEW: required for ROCm GPU access in the container
       - seccomp:unconfined
+      # <-- NEW: required on SELinux-enforcing hosts (Fedora, RHEL, CentOS).
+      # /dev/kfd is labelled hsa_device_t, and the stock container policy has
+      # no rule letting a container mmap it - the dri_device_t rule that
+      # covers /dev/dri does not apply to it. Everything else on /dev/kfd
+      # (open, ioctl) is permitted, so the GPU is detected and models start
+      # compiling; only libhsakmt's HDP-flush MMIO page fails to map, and the
+      # worker then aborts mid-compile with SIGABRT:
+      #   Failed to map remapped mmio page on gpu_mem 0
+      #   Memory critical error by agent node-0 ... Reason: Memory in use.
+      # Harmless where SELinux is not enforcing. Narrower alternative, if you
+      # would rather keep this container confined: leave this line out and
+      # have an administrator enable the container_use_devices boolean
+      # instead (it grants containers access to device nodes system-wide).
+      - label=disable
     ipc: host # <-- NEW: required for ROCm GPU access in the container
     volumes:
       - temp-audio-worker:/app/temp_audio # Volume for temporary audio files
