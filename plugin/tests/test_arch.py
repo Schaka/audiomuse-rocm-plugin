@@ -95,9 +95,9 @@ class TestGfx803:
 
     def test_clap_on_the_rocm_ep_disables_conv_fusion(self):
         # ORT's ConvActivationFusion emits FusedConv nodes that MIOpen's
-        # Fusion Plan kernels execute; on this arch those kernels
-        # intermittently read past their weight buffers and page-fault the
-        # GPU, killing the worker mid-analysis.
+        # Fusion Plan kernels execute; on this arch those kernels produce
+        # wrong output (and can still crash), confirmed on real hardware
+        # against the current base image.
         specs = Gfx803Profile().extra_providers((MIGRAPHX, ROCM_EP, CPU))
         assert specs[0].disable_optimizers == ("ConvActivationFusion",)
 

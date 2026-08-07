@@ -50,14 +50,11 @@ class Gfx803Profile(ArchProfile):
         return super().migraphx_models(providers)
 
     def extra_providers(self, providers):
-        # musicnn deliberately does not get the ROCM EP: MIOpen's fusion path
-        # for Conv+Bias+Activation corrupts GPU state on this arch and faults
-        # non-deterministically. CLAP's conv stem reaches that same fusion
-        # path through ORT's ConvActivationFusion optimizer (its FusedConv
-        # nodes run as miopenSp3AsmConvRxSU_CBA / MIOpenConvUniBatchNormActiv,
-        # which intermittently read past their weight buffers and page-fault
-        # the GPU), so that optimizer is disabled for CLAP's sessions and the
-        # convs run unfused, which is stable. Fault analysis: docs/ARCH_NOTES.md.
+        # musicnn does not get the ROCM EP: MIGraphX already serves it and is
+        # faster. CLAP's ROCM EP session still needs ConvActivationFusion
+        # disabled: confirmed on real hardware that it still produces wrong
+        # output (and can still crash) even against the current base image,
+        # despite that image's MIOpen fix. See docs/ARCH_NOTES.md.
         if ROCM not in providers:
             return ()
         return (ProviderSpec(

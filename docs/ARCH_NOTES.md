@@ -34,19 +34,22 @@ is rejected as invalid and drops the EP to CPU the same way.
 Those options take one literal file per session instead of keying a directory,
 which is why `cache.per_model_options` does that keying by hand.
 
-### CLAP cannot compile under MIGraphX → `migraphx_models()` drops it
+### CLAP can compile under MIGraphX now, but stays on the ROCM EP anyway
 
 CLAP's audio encoder has a Resize node carrying an explicit
 `keep_aspect_ratio_policy` attribute (opset-19 exporter behavior). This
-MIGraphX release's ONNX parser throws on the attribute's mere presence,
-regardless of its value or whether shapes are static or dynamic
-(`parse_resize.cpp`: `keep_aspect_ratio_policy is not supported!`).
+MIGraphX release's ONNX parser used to throw on the attribute's mere presence
+(`parse_resize.cpp`: `keep_aspect_ratio_policy is not supported!`) — fixed in
+the base image before compiling MIGraphX
+([parse-resize-fixes.patch](https://github.com/Schaka/rocm-migraphx-ort-builder/blob/main/gfx803/patches/migraphx/parse-resize-fixes.patch)).
 
-Fixed on MIGraphX `develop`, which the ROCm 7 bases build against — absent or
-`stretch` is accepted there, other policies throw with a clearer message. So
-CLAP compiles fine on gfx1030+ / gfx9xx and this is gfx803-only.
-
-Patched in base image before compiling MIGraphX.
+Verified correct on real hardware (RX 470, `model_epoch_36.onnx`, cosine
+similarity against the CPU EP output): MIGraphX now gives 0.98–0.997 across
+repeated runs with different random inputs. `migraphx_models()` still doesn't
+offer it for CLAP when the ROCM EP is available, though — the ROCM EP
+(guarded, see below) benchmarks marginally faster for CLAP on the same
+hardware (~12ms vs MIGraphX's ~13ms mean per inference), and switching would
+be a wash at best. Worth re-benchmarking if that gap changes.
 
 ### MIGraphX and the ROCM EP must never share a session
 
@@ -68,61 +71,35 @@ basis:
   — MIGraphX + ROCM in one session producing corrupted output vs. either alone;
   still open.
 
-### musicnn must never use the ROCM EP
+### musicnn stays on MIGraphX, not the ROCM EP
 
-The ROCM EP **intermittently SIGSEGVs on Conv+Bias+Activation graphs** like
-musicnn's heads. ORT's optimizer fuses those three ops into one node, which the
-ROCM EP hands to MIOpen's Fusion Plan API; on gfx803 that path corrupts GPU
-state and eventually faults with
-`Memory access fault … Page not present or supervisor privilege`.
-
-Ruled out on hardware, each individually: stale find-db (deleting the shipped
-`gfx803_*.fdb.txt` changed nothing), a single bad solver
-(`MIOPEN_DEBUG_CONV_WINOGRAD=0` no help; `MIOPEN_DEBUG_AMD_FUSED_WINOGRAD=0`
-reduced but did not eliminate it), an async race
-(`HIP_LAUNCH_BLOCKING=1` no help), and unstable VRAM (non-mining BIOS, lower
-memory clock, extra cooling). It is not deterministic: the same input crashes on
-one invocation and completes on the next.
-
-MIGraphX is also simply faster for musicnn here (~22ms vs ~26–30ms mean per
-inference, when the ROCM EP does not crash). Full write-up in the
-[base image repo](https://github.com/Schaka/rocm-migraphx-ort-builder/blob/main/gfx803/README.md#known-runtime-issue-rocmexecutionprovider-crashes-on-fused-conv-musicnn-class-models).
+Not a correctness workaround anymore (see below) — MIGraphX is just faster
+for musicnn here (~22ms vs ~26–30ms mean per inference), so `extra_providers()`
+never offers it the ROCM EP.
 
 ### CLAP on the ROCM EP needs `ConvActivationFusion` disabled
 
-CLAP is transformer-dominated, but its conv stem is enough to reach the same
-MIOpen Fusion Plan path: ORT's `ConvActivationFusion` optimizer emits FusedConv
-nodes for it, and the fused kernels (`miopenSp3AsmConvRxSU_CBA`,
-`MIOpenConvUniBatchNormActiv`) intermittently kill the worker with
-`Memory access fault … Page not present or supervisor privilege` on the first
-inference after a session is created. Isolated on hardware (RX 470 8GB,
-ROCm 6.4.4, ORT 1.21.1) with a bare create-session → run → destroy loop against
-`model_epoch_36.onnx`:
+CLAP's conv stem is enough to reach MIOpen's Fusion Plan path: ORT's
+`ConvActivationFusion` optimizer fuses Conv+Bias+Activation into FusedConv
+nodes, the ROCM EP hands those to MIOpen, and on this arch that produces wrong
+output — and can still crash with `Memory access fault … Page not present or
+supervisor privilege`.
 
-- Session churn is the amplifier, not the cause: a churn loop usually dies
-  within a handful of iterations, but a crash on the very first session of a
-  fresh process was also observed. One long-lived session survived 180
-  consecutive inferences. This matches production, where core reloads the CLAP
-  audio model per track (`PER_SONG_MODEL_RELOAD`), so every track rolls the dice.
-- The faulting access is a **read past the end of an ORT arena chunk holding
-  the conv weights** (HSA fault address exactly at the chunk's end boundary,
-  `VM fault … read from 'TC'` in dmesg — a compute kernel, not a DMA engine).
-  Whether the over-read faults depends on whether the neighbouring page is
-  mapped, hence the non-determinism as arena layout shifts between sessions.
-- Ruled out on hardware: SDMA copies (`HSA_ENABLE_SDMA=0` still crashes) and
-  async races (`AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` still crashes;
-  the serialized log pins the fault on the fused kernels above).
-- Disabling only `ConvActivationFusion` via the
-  `optimization.disable_specified_optimizers` session config entry removes
-  every fused kernel from the AMD log (the convs run as plain
-  `miopenSp3AsmConvRxSU` / `naive_conv` + a separate ReLU) and a 200-iteration
-  churn loop then survives where the baseline died within 2.
+The base image rebuilds MIOpen from source with a fix for one specific cause
+of this (`patches/miopen/conv-direct-fwd-grouped-oob.sh`, an OOB read in
+`ConvOclDirectFwd` for grouped/depthwise convs — see the [base image repo's
+KERNEL_BUGS.md](https://github.com/Schaka/rocm-migraphx-ort-builder/blob/main/gfx803/KERNEL_BUGS.md#miopen-convactivationfusion-investigation)).
+That fix is real but not sufficient: re-tested directly against a locally
+built image carrying it (`LD_PRELOAD`/sgemm-shim and the rebuilt MIOpen both
+confirmed present), `ConvActivationFusion` left enabled still gives
+cos(CPU, ROCM) of 0.24–0.84 across repeated runs with different random inputs
+(vs. 0.98+ with it disabled) and still crashed once during a short churn
+test. So the plugin keeps disabling it itself.
 
-onnxruntime has no environment variable for this and core builds its own
-`SessionOptions`, so the plugin applies the entry by wrapping
-`onnxruntime.InferenceSession` at registration time — see
-`ort_fusion_guard.py`. The guard keys on the provider chain, which on this
-arch scopes it to exactly the CLAP session.
+`ort_fusion_guard.py` applies `optimization.disable_specified_optimizers` at
+session-creation time — see `ProviderSpec.disable_optimizers` in
+`arch/base.py`. The guard keys on the provider chain, which on this arch
+scopes it to exactly the CLAP session.
 
 ### faster-whisper on gfx803: `float16` is the only correct compute type
 
